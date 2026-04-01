@@ -1,0 +1,42 @@
+;; Standard I/O helpers — includes wasi_p1.woua for the full WASI p1 surface.
+;;   (include "std_io.woua")
+
+(include wasi_p1)
+
+;; Iovec: WASI scatter/gather I/O vector (wasi_ciovec_t layout).
+;; An extra 4-byte nwritten slot is allocated after the struct at runtime.
+(deftype Iovec
+  (base :ptr)
+  (len  :i32))
+
+;; write is a macro: allocates an Iovec (+4 nwritten) at runtime via alloc,
+;; fills the fields by name, then calls fd_write.
+;; (sizeof Iovec) is a compile-time intrinsic: resolves to the struct byte size.
+;; (as :i32 ...) casts the Iovec pointer to the raw i32 expected by fd_write.
+(defmacro write (fd ptr len)
+  (let __write_iov :Iovec (alloc (+ (sizeof Iovec) 4))
+    (Iovec/base! __write_iov ptr)
+    (Iovec/len!  __write_iov len)
+    (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
+
+;; write-string: like write but takes a runtime String struct instead of
+;; compile-time static-ptr/static-len.
+(defmacro write-string (fd s)
+  (write fd (String/ptr s) (String/len s)))
+
+;; print-string: print a runtime String struct to stdout.
+(defmacro print-string (s)
+  (write-string 1 s))
+
+;; print-int: convert an i32 to string and print it to stdout.
+(defmacro print-int (n)
+  (print-string (i32->string n)))
+
+;; print-int64: convert an i64 to string and print it to stdout.
+(defmacro print-int64 (n)
+  (print-string (i64->string n)))
+
+;; print is a macro: (print sym) expands to (write 1 ptr len)
+;; where ptr and len are resolved at compile time from the static table.
+(defmacro print (sym)
+  (write 1 (static-ptr sym) (static-len sym)))

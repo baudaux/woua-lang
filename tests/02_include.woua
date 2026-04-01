@@ -1,0 +1,9 @@
+;; Test: include
+;; (include std_io) brings in wasi_p1.woua → core.woua transitively.
+;; Verifies that the include chain resolves library files correctly.
+;; Expected output: include ok
+
+(include std_io)
+
+(defn main ()
+  (print "include ok\n"))

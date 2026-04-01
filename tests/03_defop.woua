@@ -1,0 +1,12 @@
+;; Test: defop
+;; Declares a new operator 'mod' backed by i32.rem_s (signed remainder).
+;; Verifies that user-defined operators can be added to the operator table.
+;; Expected output: 7
+
+(include std_io)
+
+(defop mod "i32.rem_s" (:i32 :i32) :i32)
+
+(defn main ()
+  (print-int (mod 47 10))
+  (print "\n"))

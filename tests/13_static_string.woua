@@ -1,0 +1,17 @@
+;; Test: static string allocation (:static flag on defliteral)
+;; Every string literal "..." is interned into linear memory at compile time
+;; (because defliteral string has :static).  static-ptr and static-len resolve
+;; to those compile-time constants.  The same string literal used twice must
+;; resolve to the same pointer (deduplication).
+;; Expected output:
+;;   hello
+;;   same ptr: 1
+
+(include std_io)
+
+(defn main ()
+  (print "hello\n")
+  ;; Both occurrences of "hello\n" must share the same static pointer.
+  (if (= (static-ptr "hello\n") (static-ptr "hello\n"))
+    (print "same ptr: 1\n")
+    (print "same ptr: 0\n")))

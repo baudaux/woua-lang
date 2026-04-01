@@ -1,0 +1,23 @@
+;; Test: i32->string  (number to string conversion)
+;; Exercises i32->string and print-string with positive, negative, zero,
+;; and the min/max i32 values.
+;; Expected output:
+;;   0
+;;   42
+;;   -1
+;;   2147483647
+;;   -2147483648
+
+(include std_io)
+
+(defn main ()
+  (print-string (i32->string 0))
+  (print "\n")
+  (print-string (i32->string 42))
+  (print "\n")
+  (print-string (i32->string -1))
+  (print "\n")
+  (print-string (i32->string 2147483647))
+  (print "\n")
+  (print-string (i32->string -2147483648))
+  (print "\n"))

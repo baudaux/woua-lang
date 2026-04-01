@@ -1,0 +1,15 @@
+;; Test: defn + recursive call
+;; Defines a recursive function computing the nth Fibonacci number.
+;; Verifies that defn supports recursion and local function calls.
+;; Expected output: 55
+
+(include std_io)
+
+(defn fib (n)
+  (if (< n 2)
+    n
+    (+ (fib (- n 1)) (fib (- n 2)))))
+
+(defn main ()
+  (print-int (fib 10))
+  (print "\n"))

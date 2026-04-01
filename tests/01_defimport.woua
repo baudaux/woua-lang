@@ -1,0 +1,20 @@
+;; Test: defimport
+;; Declares fd_write and proc_exit directly (no std_io/wasi_p1 include)
+;; and uses them to write a line to stdout.
+;; Expected output: defimport ok
+
+(include core)
+
+(defimport fd_write  "wasi_snapshot_preview1" "fd_write"  (:i32 :i32 :i32 :i32) :i32)
+(defimport proc_exit "wasi_snapshot_preview1" "proc_exit" (:i32))
+
+(deftype Iov (base :ptr) (len :i32))
+
+(defstatic msg "defimport ok\n")
+
+(defn main ()
+  (drop (let iov :Iov (alloc (+ (sizeof Iov) 4))
+    (Iov/base! iov (static-ptr msg))
+    (Iov/len!  iov (static-len msg))
+    (fd_write 1 (as :i32 iov) 1 (+ (as :i32 iov) (sizeof Iov)))))
+  (proc_exit 0))

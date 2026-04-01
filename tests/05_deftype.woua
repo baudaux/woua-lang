@@ -1,0 +1,23 @@
+;; Test: deftype + field accessors
+;; Declares a struct type with two fields, allocates it on the heap,
+;; sets and reads each field by name using the generated accessor macros.
+;; Expected output:
+;;   x: 10
+;;   y: 20
+
+(include std_io)
+
+(deftype Point
+  (x :i32)
+  (y :i32))
+
+(defn main ()
+  (let p :Point (alloc (sizeof Point))
+    (Point/x! p 10)
+    (Point/y! p 20)
+    (print "x: ")
+    (print-int (Point/x p))
+    (print "\n")
+    (print "y: ")
+    (print-int (Point/y p))
+    (print "\n")))

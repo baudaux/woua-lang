@@ -1,0 +1,165 @@
+;; Core language operators and types — foundational declarations for woua.
+;; (defop name "wat-op" (param-types...) result-type)
+;; Same operator name can be declared multiple times for different types;
+;; the compiler selects the right overload via type inference.
+
+;; ── String ────────────────────────────────────────────────────────────────────
+;; A string literal "..." is detected by the compiler and auto-allocated in
+;; linear memory at compile time. (static-ptr "s") and (static-len "s") resolve
+;; to the byte pointer and length as compile-time constants.
+;;
+;; String is the runtime struct type for a (ptr, len) pair.
+(deftype String
+  (ptr :ptr)
+  (len :i32))
+
+;; (string "literal") allocates a String struct on the heap and fills it.
+;; Use this when you need to pass a string as a single value at runtime.
+(defmacro string (s)
+  (let __s :String (alloc (sizeof String))
+    (String/ptr! __s (static-ptr s))
+    (String/len! __s (static-len s))
+    __s))
+
+;; ── Literal recognition ──────────────────────────────────────────────────────
+;; (defliteral name "regex" :node-type)
+;; Declares how the reader recognises a literal token.
+;; The regex must have exactly one capture group containing the literal value.
+
+;; A string literal: characters between double quotes, with escape sequences.
+;; :static means matched values are interned into linear memory at compile time.
+(defliteral string /"((?:[^"\\]|\\.)*)"/  :string :static)
+
+;; Hexadecimal literals — prefix 0x, uppercase or lowercase digits.
+;; Declared before int/int64 so the prefix check fires in the same read pass.
+(defliteral hex64 /0x[0-9a-fA-F]+i64/ :i64)
+(defliteral hex   /0x[0-9a-fA-F]+/    :i32)
+
+;; An i64 literal: digits followed by the "i64" suffix.  Must be declared
+;; before plain int so the reader tries the longer match first.
+(defliteral int64  /-?[0-9]+i64/          :i64)
+
+;; An integer literal: optional minus sign followed by one or more digits → i32.
+(defliteral int    /-?[0-9]+/             :i32)
+
+;; An f64 literal: float digits followed by the "f64" suffix.
+(defliteral float64 /-?[0-9]*\.[0-9]+f64/ :f64)
+
+;; A float literal: optional minus, digits, a decimal point, and more digits → f32.
+(defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
+
+
+(defop + "i32.add"   (:i32 :i32) :i32)
+(defop - "i32.sub"   (:i32 :i32) :i32)
+(defop * "i32.mul"   (:i32 :i32) :i32)
+(defop / "i32.div_s" (:i32 :i32) :i32)
+
+;; ── i32 comparison ───────────────────────────────────────────────────────────
+(defop =  "i32.eq"   (:i32 :i32) :i32)
+(defop <  "i32.lt_s" (:i32 :i32) :i32)
+(defop >  "i32.gt_s" (:i32 :i32) :i32)
+(defop <= "i32.le_s" (:i32 :i32) :i32)
+(defop >= "i32.ge_s" (:i32 :i32) :i32)
+
+;; ── i64 arithmetic ───────────────────────────────────────────────────────────
+(defop + "i64.add"   (:i64 :i64) :i64)
+(defop - "i64.sub"   (:i64 :i64) :i64)
+(defop * "i64.mul"   (:i64 :i64) :i64)
+(defop / "i64.div_s" (:i64 :i64) :i64)
+
+;; ── i64 comparison ───────────────────────────────────────────────────────────
+(defop =  "i64.eq"   (:i64 :i64) :i32)
+(defop <  "i64.lt_s" (:i64 :i64) :i32)
+(defop >  "i64.gt_s" (:i64 :i64) :i32)
+(defop <= "i64.le_s" (:i64 :i64) :i32)
+(defop >= "i64.ge_s" (:i64 :i64) :i32)
+
+;; ── f32 arithmetic ───────────────────────────────────────────────────────────
+(defop + "f32.add" (:f32 :f32) :f32)
+(defop - "f32.sub" (:f32 :f32) :f32)
+(defop * "f32.mul" (:f32 :f32) :f32)
+(defop / "f32.div" (:f32 :f32) :f32)
+
+;; ── f32 comparison ───────────────────────────────────────────────────────────
+(defop =  "f32.eq" (:f32 :f32) :i32)
+(defop <  "f32.lt" (:f32 :f32) :i32)
+(defop >  "f32.gt" (:f32 :f32) :i32)
+(defop <= "f32.le" (:f32 :f32) :i32)
+(defop >= "f32.ge" (:f32 :f32) :i32)
+
+;; ── f64 arithmetic ───────────────────────────────────────────────────────────
+(defop + "f64.add" (:f64 :f64) :f64)
+(defop - "f64.sub" (:f64 :f64) :f64)
+(defop * "f64.mul" (:f64 :f64) :f64)
+(defop / "f64.div" (:f64 :f64) :f64)
+
+;; ── f64 comparison ───────────────────────────────────────────────────────────
+(defop =  "f64.eq" (:f64 :f64) :i32)
+(defop <  "f64.lt" (:f64 :f64) :i32)
+(defop >  "f64.gt" (:f64 :f64) :i32)
+(defop <= "f64.le" (:f64 :f64) :i32)
+(defop >= "f64.ge" (:f64 :f64) :i32)
+
+;; ── Number → String conversion ───────────────────────────────────────────────
+;;
+;; i32-digits-buf n buf
+;;   Writes the decimal ASCII digits of n into buf (12 bytes) right-to-left,
+;;   starting from buf+11 downward.  Returns the pointer to the first character.
+;;   Handles negative numbers by prepending '-'.
+;;
+;; i32->string n
+;;   Allocates a scratch buffer and a String struct, fills them via
+;;   i32-digits-buf, and returns the String struct pointer.
+
+(defn i32-digits-buf (n buf)
+  (let neg  :i32 (< n 0)
+    ;; Work with a negative magnitude to avoid INT_MIN overflow.
+    ;; (- 0 INT_MIN) wraps, so instead we always work in the negative domain:
+    ;; negabs = -|n| = n when n<0, else -n.
+    (let negabs :i32 (if neg n (- 0 n))
+      (let pos :i32 (+ buf 11)
+        ;; Extract digits using negabs; each digit is -(negabs mod 10) ∈ [0,9].
+        (while (< negabs -9)
+          (i32.store8 pos (- 48 (- negabs (* (/ negabs 10) 10))))
+          (set! pos    (- pos 1))
+          (set! negabs (/ negabs 10)))
+        (i32.store8 pos (- 48 negabs))
+        (if neg
+          (let _dummy :i32 0
+            (set! pos (- pos 1))
+            (i32.store8 pos 45)))
+        pos))))
+
+(defn i32->string (n)
+  (let buf   :ptr (alloc 12)
+    (let start :ptr (i32-digits-buf n buf)
+      (let s :String (alloc (sizeof String))
+        (String/ptr! s start)
+        (String/len! s (- (+ buf 12) start))
+        s))))
+
+;; i64-digits-buf n buf
+;;   Like i32-digits-buf but for i64 values. buf must be at least 21 bytes.
+;;   Returns pointer to first character.
+(defn i64-digits-buf (n :i64 buf :ptr)
+  (let neg    :i32 (< n 0i64)
+    (let negabs :i64 (if neg n (- 0i64 n))
+      (let pos :i32 (+ buf 20)
+        (while (< negabs -9i64)
+          (i32.store8 pos (- 48 (as :i32 (- negabs (* (/ negabs 10i64) 10i64)))))
+          (set! pos    (- pos 1))
+          (set! negabs (/ negabs 10i64)))
+        (i32.store8 pos (- 48 (as :i32 negabs)))
+        (if neg
+          (let _dummy :i32 0
+            (set! pos (- pos 1))
+            (i32.store8 pos 45)))
+        pos))))
+
+(defn i64->string (n :i64)
+  (let buf   :ptr (alloc 24)
+    (let start :ptr (i64-digits-buf n buf)
+      (let s :String (alloc (sizeof String))
+        (String/ptr! s start)
+        (String/len! s (- (+ buf 21) start))
+        s))))

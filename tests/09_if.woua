@@ -1,0 +1,18 @@
+;; Test: if expression
+;; Exercises the three-armed (if cond then else) expression,
+;; and the two-armed (if cond then) form (void else branch).
+;; Expected output:
+;;   positive
+;;   done
+
+(include std_io)
+
+(defn sign (n)
+  (if (> n 0)
+    (print "positive\n")
+    (print "non-positive\n")))
+
+(defn main ()
+  (sign 5)
+  (if 1
+    (print "done\n")))

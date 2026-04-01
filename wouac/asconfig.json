@@ -1,0 +1,32 @@
+{
+  "targets": {
+    "debug": {
+      "outFile":       "dist/wouac.debug.wasm",
+      "textFile":      "dist/wouac.debug.wat",
+      "sourceMap":     true,
+      "debug":         true
+    },
+    "release": {
+      "outFile":       "dist/wouac.wasm",
+      "optimizeLevel": 3,
+      "shrinkLevel":   1,
+      "converge":      false,
+      "noAssert":      false
+    }
+  },
+  "options": {
+    "lib":     "./node_modules/@assemblyscript/wasi-shim/assembly",
+    "use":     [
+      "ASC_WASI=1",
+      "abort=wasi_abort",
+      "trace=wasi_trace",
+      "seed=wasi_seed",
+      "console=wasi_console",
+      "crypto=wasi_crypto",
+      "performance=wasi_performance",
+      "process=wasi_process",
+      "Date=wasi_Date"
+    ],
+    "runtime": "stub"
+  }
+}

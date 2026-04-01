@@ -1,0 +1,13 @@
+;; Test: as (type cast)
+;; Casts between numeric types using (as :Type expr).
+;; Tests i32→i64 widening, i64 overflow arithmetic, i64 division, i64→i32 narrowing.
+;; Expected output: 2500000
+
+(include std_io)
+
+(defn main ()
+  (let a :i32 50000
+    (let b :i64 (* (as :i64 a) (as :i64 a))  ;; 2,500,000,000 — overflows i32
+      (let c :i32 (as :i32 (/ b 1000i64))    ;; 2,500,000 — fits in i32
+        (print-int c)
+        (print "\n")))))

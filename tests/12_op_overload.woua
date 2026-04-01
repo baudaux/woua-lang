@@ -1,0 +1,25 @@
+;; Test: op type overloading
+;; The same operator name (+, <) dispatches to different WAT instructions
+;; depending on the types of its arguments (i32 vs i64 vs f32).
+;; Verifies that the overload-resolution in resolveOp works correctly.
+;; Expected output:
+;;   i32: 3
+;;   i64: 5000000000
+;;   f32: ok
+
+(include std_io)
+
+(defn main ()
+  ;; i32 overload
+  (print "i32: ")
+  (print-int (+ 1 2))
+  (print "\n")
+  ;; i64 overload — result exceeds i32 max (2147483647)
+  (let a :i64 (+ 3000000000i64 2000000000i64)
+    (print "i64: ")
+    (print-int64 a)
+    (print "\n"))
+  ;; f32 overload — just verify the comparison branch is reached
+  (if (> 3.14 3.0)
+    (print "f32: ok\n")
+    (print "f32: fail\n")))

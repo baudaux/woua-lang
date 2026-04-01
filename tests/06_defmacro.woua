@@ -1,0 +1,13 @@
+;; Test: defmacro
+;; Declares a macro 'square' that expands (square x) to (* x x).
+;; Verifies macro expansion with a single parameter.
+;; Expected output: 49
+
+(include std_io)
+
+(defmacro square (x)
+  (* x x))
+
+(defn main ()
+  (print-int (square 7))
+  (print "\n"))

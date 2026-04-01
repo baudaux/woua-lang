@@ -1,0 +1,47 @@
+;; WASI Preview 1 — standard function imports, types, and I/O helpers.
+;; Include this file to get access to the full WASI p1 surface:
+;;   (include "wasi_p1.woua")
+
+(include core)
+
+;; ── Process ──────────────────────────────────────────────────────────────────
+;; proc_exit(rval: i32) → void
+(defimport proc_exit "wasi_snapshot_preview1" "proc_exit" (:i32))
+
+;; ── Arguments ────────────────────────────────────────────────────────────────
+;; args_sizes_get(argc_ptr: i32, argv_buf_size_ptr: i32) → errno
+(defimport args_sizes_get "wasi_snapshot_preview1" "args_sizes_get" (:i32 :i32) :i32)
+;; args_get(argv_ptr: i32, argv_buf_ptr: i32) → errno
+(defimport args_get "wasi_snapshot_preview1" "args_get" (:i32 :i32) :i32)
+
+;; ── Environment ──────────────────────────────────────────────────────────────
+;; environ_sizes_get(count_ptr: i32, buf_size_ptr: i32) → errno
+(defimport environ_sizes_get "wasi_snapshot_preview1" "environ_sizes_get" (:i32 :i32) :i32)
+;; environ_get(environ_ptr: i32, environ_buf_ptr: i32) → errno
+(defimport environ_get "wasi_snapshot_preview1" "environ_get" (:i32 :i32) :i32)
+
+;; ── File descriptors ──────────────────────────────────────────────────────────
+;; fd_read(fd: i32, iovs_ptr: i32, iovs_len: i32, nread_ptr: i32) → errno
+(defimport fd_read "wasi_snapshot_preview1" "fd_read" (:i32 :i32 :i32 :i32) :i32)
+;; fd_write(fd: i32, iovs_ptr: i32, iovs_len: i32, nwritten_ptr: i32) → errno
+(defimport fd_write "wasi_snapshot_preview1" "fd_write" (:i32 :i32 :i32 :i32) :i32)
+;; fd_close(fd: i32) → errno
+(defimport fd_close "wasi_snapshot_preview1" "fd_close" (:i32) :i32)
+;; fd_seek(fd: i32, offset: i64, whence: i32, newoffset_ptr: i32) → errno
+(defimport fd_seek "wasi_snapshot_preview1" "fd_seek" (:i32 :i64 :i32 :i32) :i32)
+;; fd_tell(fd: i32, offset_ptr: i32) → errno
+(defimport fd_tell "wasi_snapshot_preview1" "fd_tell" (:i32 :i32) :i32)
+;; fd_sync(fd: i32) → errno
+(defimport fd_sync "wasi_snapshot_preview1" "fd_sync" (:i32) :i32)
+
+;; ── Clock ─────────────────────────────────────────────────────────────────────
+;; clock_time_get(clock_id: i32, precision: i64, time_ptr: i32) → errno
+(defimport clock_time_get "wasi_snapshot_preview1" "clock_time_get" (:i32 :i64 :i32) :i32)
+;; clock_res_get(clock_id: i32, resolution_ptr: i32) → errno
+(defimport clock_res_get "wasi_snapshot_preview1" "clock_res_get" (:i32 :i32) :i32)
+
+;; ── Random ────────────────────────────────────────────────────────────────────
+;; random_get(buf_ptr: i32, buf_len: i32) → errno
+(defimport random_get "wasi_snapshot_preview1" "random_get" (:i32 :i32) :i32)
+
+

@@ -1,0 +1,12 @@
+;; Test: let + set!
+;; Declares a local variable with let, then mutates it with set!.
+;; Verifies that let-bindings are mutable via set!.
+;; Expected output: 30
+
+(include std_io)
+
+(defn main ()
+  (let x :i32 10
+    (set! x (+ x 20))
+    (print-int x)
+    (print "\n")))

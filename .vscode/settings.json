@@ -1,0 +1,7 @@
+{
+  "typescript.tsdk": "wouac/node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "files.associations": {
+    "*.ts": "typescript"
+  }
+}
