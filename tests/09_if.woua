@@ -5,7 +5,7 @@
 ;;   positive
 ;;   done
 
-(include std_io)
+(include io)
 
 (defn sign (n)
   (if (> n 0)

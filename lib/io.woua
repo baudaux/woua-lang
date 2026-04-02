@@ -1,0 +1,110 @@
+;; Standard I/O helpers — includes wasi_p1.woua for the full WASI p1 surface.
+;;   (include "std_io.woua")
+
+(include wasi_p1)
+(include string)
+
+;; Iovec: WASI scatter/gather I/O vector (wasi_ciovec_t layout).
+;; An extra 4-byte nwritten slot is allocated after the struct at runtime.
+(deftype Iovec
+  (base :ptr)
+  (len  :i32))
+
+;; write is a macro: allocates an Iovec (+4 nwritten) at runtime via alloc,
+;; fills the fields by name, then calls fd_write.
+;; (sizeof Iovec) is a compile-time intrinsic: resolves to the struct byte size.
+;; (as :i32 ...) casts the Iovec pointer to the raw i32 expected by fd_write.
+(defmacro write (fd ptr len)
+  (let __write_iov :Iovec (alloc (+ (sizeof Iovec) 4))
+    (Iovec/base! __write_iov ptr)
+    (Iovec/len!  __write_iov len)
+    (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
+
+;; write-string: like write but takes a runtime String struct instead of
+;; compile-time static-ptr/static-len.
+(defmacro write-string (fd s)
+  (write fd (String/ptr s) (String/len s)))
+
+;; print-string: print a runtime String struct to stdout.
+(defmacro print-string (s)
+  (write-string 1 s))
+
+;; print-int: convert an i32 to string and print it to stdout.
+(defmacro print-int (n)
+  (print-string (i32->string n)))
+
+;; print-int64: convert an i64 to string and print it to stdout.
+(defmacro print-int64 (n)
+  (print-string (i64->string n)))
+
+;; print-char: print a single byte value as a character to stdout.
+(defmacro print-char (c)
+  (let __pc_buf :ptr (alloc 4)
+    (i32.store8 __pc_buf c)
+    (write 1 __pc_buf 1)))
+
+;; print is a macro: (print sym) expands to (write 1 ptr len)
+;; where ptr and len are resolved at compile time from the static table.
+(defmacro print (sym)
+  (write 1 (static-ptr sym) (static-len sym)))
+
+;; ── printf ───────────────────────────────────────────────────────────────────
+;; (printf "format" args...)  — compile-time format string expansion.
+;; The format string must be a string literal. Supported specifiers:
+;;   %d / %i    → print-int   (i32)
+;;   %ld / %li  → print-int64 (i64)
+;;   %s         → print-string (String)
+;;   %c         → print-char  (byte as i32)
+;;   %%         → literal %
+;;
+;; printf-impl is the recursive worker:
+;;   fmt  = string literal (interned to __str:... at macro-call time)
+;;   pos  = current scan position (compile-time integer)
+;;   alist = remaining runtime arguments (compile-time MacroListNode)
+(defmacro printf-impl (fmt pos alist)
+  (macro-if (>= pos (string-length fmt))
+    0
+    (macro-if (= (string-byte-at fmt pos) 37)
+      ;; '%' at pos — dispatch on the next character
+      (macro-if (= (string-byte-at fmt (+ pos 1)) 100)
+        (macro-seq (print-int    (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
+        (macro-if (= (string-byte-at fmt (+ pos 1)) 105)
+          (macro-seq (print-int    (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
+          (macro-if (= (string-byte-at fmt (+ pos 1)) 115)
+            (macro-seq (print-string (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
+            (macro-if (= (string-byte-at fmt (+ pos 1)) 99)
+              (macro-seq (print-char   (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
+              (macro-if (= (string-byte-at fmt (+ pos 1)) 108)
+                ;; '%l...' → i64 (treats %ld, %li, %l? all as print-int64, advance 3)
+                (macro-seq (print-int64  (macro-first alist)) (printf-impl fmt (+ pos 3) (macro-rest alist)))
+                ;; '%x' unknown or '%%' → print '%', advance 2
+                (macro-seq (print-char 37) (printf-impl fmt (+ pos 2) alist)))))))
+      ;; Regular character at pos — print it and advance
+      (macro-seq
+        (print-char (string-byte-at fmt pos))
+        (printf-impl fmt (+ pos 1) alist)))))
+
+(defmacro printf (fmt ...args)
+  (drop (printf-impl fmt 0 args)))
+
+;; read-line: read one line from fd into buf (up to maxlen bytes), byte by byte.
+;; Strips the trailing newline. Returns a String pointing into buf,
+;; or a zero-length String on EOF.
+(defn read-line (fd buf maxlen)
+  (let iov      :Iovec (alloc (+ (sizeof Iovec) 4))
+    (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
+      (Iovec/len! iov 1)
+      (let len  :i32 0
+        (let stop :i32 0
+          (while (= stop 0)
+            (Iovec/base! iov (+ buf len))
+            (drop (fd_read fd (as :i32 iov) 1 nread_ptr))
+            (if (= (i32.load nread_ptr) 0)
+              (set! stop 1)
+              (if (= (i32.load8_u (+ buf len)) 10)
+                (set! stop 1)
+                (set! len (+ len 1)))))
+          (let s :String (alloc (sizeof String))
+            (String/ptr! s buf)
+            (String/len! s len)
+            s))))))

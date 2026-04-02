@@ -7,7 +7,7 @@
 ;;   hello
 ;;   same ptr: 1
 
-(include std_io)
+(include io)
 
 (defn main ()
   (print "hello\n")

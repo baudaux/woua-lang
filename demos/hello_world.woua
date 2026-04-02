@@ -1,11 +1,7 @@
 ;; Hello, World! in woua
 
-(include std_io)
+(include io)
 
 ;; Main entry point
 (defn main ()
-  (print "Hello, World!\n")
-  (print-string (i32->string 42))
-  (print "\n")
-  (print-string (i32->string -2147483648))
-  (print "\n"))
+  (print "Hello, World!\n"))

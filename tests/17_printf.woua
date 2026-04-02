@@ -1,0 +1,11 @@
+(include io)
+
+(defn main ()
+  (let name :String (string "world")
+    (let n :i32 42
+      (let big :i64 1000000000000i64
+        (printf "hello %s!\n" name)
+        (printf "n = %d\n" n)
+        (printf "big = %ld\n" big)
+        (printf "100%% done\n")
+        (printf "char: %c\n" 'A')))))

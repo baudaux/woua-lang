@@ -1,0 +1,17 @@
+;; Test: char literal
+;; 'A' → 65, '\n' → 10, '\'' → 39, '\0' → 0
+;; Expected output:
+;;   65
+;;   10
+;;   39
+;;   0
+;;   A
+
+(include io)
+
+(defn main ()
+  (printf "%d\n" 'A')
+  (printf "%d\n" '\n')
+  (printf "%d\n" '\'')
+  (printf "%d\n" '\0')
+  (printf "%c\n" 'A'))

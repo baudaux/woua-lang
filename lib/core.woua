@@ -30,6 +30,11 @@
 ;; :static means matched values are interned into linear memory at compile time.
 (defliteral string /"((?:[^"\\]|\\.)*)"/  :string :static)
 
+;; A character literal: a single character between single quotes → i32 code point.
+;; Supports the same escape sequences as string literals: \n \t \r \\ \' \0
+;; Examples: 'A' → 65,  '\n' → 10,  '\'' → 39
+(defliteral char /'.'/  :char)
+
 ;; Hexadecimal literals — prefix 0x, uppercase or lowercase digits.
 ;; Declared before int/int64 so the prefix check fires in the same read pass.
 (defliteral hex64 /0x[0-9a-fA-F]+i64/ :i64)

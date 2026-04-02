@@ -3,11 +3,10 @@
 ;; Verifies macro expansion with a single parameter.
 ;; Expected output: 49
 
-(include std_io)
+(include io)
 
 (defmacro square (x)
   (* x x))
 
 (defn main ()
-  (print-int (square 7))
-  (print "\n"))
+  (printf "%d\n" (square 7)))

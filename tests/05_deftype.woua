@@ -5,7 +5,7 @@
 ;;   x: 10
 ;;   y: 20
 
-(include std_io)
+(include io)
 
 (deftype Point
   (x :i32)
@@ -15,9 +15,5 @@
   (let p :Point (alloc (sizeof Point))
     (Point/x! p 10)
     (Point/y! p 20)
-    (print "x: ")
-    (print-int (Point/x p))
-    (print "\n")
-    (print "y: ")
-    (print-int (Point/y p))
-    (print "\n")))
+    (printf "x: %d\n" (Point/x p))
+    (printf "y: %d\n" (Point/y p))))

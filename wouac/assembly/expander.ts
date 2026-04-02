@@ -5,7 +5,8 @@
 // Other forms are passed through to codegen.
 
 import { Node, ListNode, SymbolNode, IntNode, StringNode, RegexNode,
-         TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX } from "./ast";
+         MacroListNode,
+         TAG_INT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST } from "./ast";
 import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo } from "./env";
 import { expandDefstatic, expandDeftype, internString } from "./macros";
 
@@ -13,6 +14,71 @@ import { expandDefstatic, expandDeftype, internString } from "./macros";
 export class ExpandedForm {
   node: Node;
   constructor(node: Node) { this.node = node; }
+}
+
+// ── Compile-time integer evaluation ──────────────────────────────────────────
+
+// Wrapper for nullable i64 (AssemblyScript can't return primitive | null).
+class IntVal { value: i64; constructor(v: i64) { this.value = v; } }
+
+// Extract the original string content from a node:
+//   StringNode(s)                → s
+//   SymbolNode("__str:s")       → s  (interned form)
+//   anything else               → null
+function getStringContent(node: Node): string | null {
+  if (node.tag == TAG_STRING) return (node as StringNode).value;
+  if (node.tag == TAG_SYMBOL) {
+    const n = (node as SymbolNode).name;
+    if (n.startsWith("__str:")) return n.slice(6);
+  }
+  return null;
+}
+
+// Evaluate a node as a compile-time integer, or return null.
+// Handles: IntNode, (string-length str), (string-byte-at str idx),
+//          (macro-empty? list), arithmetic (+,-,*) and comparisons (=,<,>,<=,>=,!=).
+function evalConstInt(node: Node): IntVal | null {
+  if (node.tag == TAG_INT) return new IntVal((node as IntNode).value);
+  if (node.tag != TAG_LIST) return null;
+  const list = node as ListNode;
+  if (list.children.length == 0 || list.children[0].tag != TAG_SYMBOL) return null;
+  const op = (list.children[0] as SymbolNode).name;
+
+  if (op == "string-length" && list.children.length == 2) {
+    const s = getStringContent(list.children[1]);
+    if (s != null) return new IntVal(s!.length as i64);
+    return null;
+  }
+  if (op == "string-byte-at" && list.children.length == 3) {
+    const s   = getStringContent(list.children[1]);
+    const idx = evalConstInt(list.children[2]);
+    if (s != null && idx != null) {
+      const i = i32(idx!.value);
+      if (i >= 0 && i < s!.length) return new IntVal(s!.charCodeAt(i) as i64);
+      return new IntVal(-1 as i64); // out of bounds
+    }
+    return null;
+  }
+  if (op == "macro-empty?" && list.children.length == 2) {
+    if (list.children[1].tag == TAG_MACROLIST)
+      return new IntVal((list.children[1] as MacroListNode).items.length == 0 ? 1 : 0);
+    return null;
+  }
+  if (list.children.length == 3) {
+    const a = evalConstInt(list.children[1]);
+    const b = evalConstInt(list.children[2]);
+    if (a == null || b == null) return null;
+    if (op == "+")  return new IntVal(a!.value + b!.value);
+    if (op == "-")  return new IntVal(a!.value - b!.value);
+    if (op == "*")  return new IntVal(a!.value * b!.value);
+    if (op == "=")  return new IntVal(a!.value == b!.value ? 1 : 0);
+    if (op == "!=") return new IntVal(a!.value != b!.value ? 1 : 0);
+    if (op == "<")  return new IntVal(a!.value <  b!.value ? 1 : 0);
+    if (op == ">")  return new IntVal(a!.value >  b!.value ? 1 : 0);
+    if (op == "<=") return new IntVal(a!.value <= b!.value ? 1 : 0);
+    if (op == ">=") return new IntVal(a!.value >= b!.value ? 1 : 0);
+  }
+  return null;
 }
 
 // ── User-macro expansion ──────────────────────────────────────────────────────
@@ -25,6 +91,9 @@ function expandNode(node: Node, env: Env): Node {
     internString((node as StringNode).value, env);
     return new SymbolNode("__str:" + (node as StringNode).value);
   }
+  // MacroListNodes are compile-time only; pass through unchanged unless an
+  // intrinsic (macro-first / macro-rest / macro-empty?) consumes them.
+  if (node.tag == TAG_MACROLIST) return node;
   if (node.tag != TAG_LIST) return node;
   const list = node as ListNode;
   if (list.children.length == 0) return node;
@@ -59,6 +128,80 @@ function expandNode(node: Node, env: Env): Node {
       const val = name == "static-ptr" ? info.ptr as i64 : info.len as i64;
       return new IntNode(val);
     }
+
+    // ── (string-length str) — compile-time string length ────────────────────
+    // ── (string-byte-at str idx) — compile-time byte value at index ───────
+    if (name == "string-length" || name == "string-byte-at") {
+      const v = evalConstInt(list);
+      if (v != null) return new IntNode(v!.value);
+      env.errors.push(name + ": arguments must be compile-time string/integer constants");
+      return new IntNode(0 as i64);
+    }
+
+    // ── (macro-empty? list) — 1 if the compile-time list is empty, 0 otherwise ─
+    if (name == "macro-empty?") {
+      const inner = expandNode(list.children[1], env);
+      if (inner.tag == TAG_MACROLIST)
+        return new IntNode((inner as MacroListNode).items.length == 0 ? 1 : 0);
+      env.errors.push("macro-empty?: argument is not a macro list");
+      return new IntNode(0 as i64);
+    }
+
+    // ── (macro-first list) — first element of a compile-time list ───────────
+    if (name == "macro-first") {
+      const inner = expandNode(list.children[1], env);
+      if (inner.tag == TAG_MACROLIST) {
+        const items = (inner as MacroListNode).items;
+        if (items.length == 0) {
+          env.errors.push("macro-first: empty list");
+          return new IntNode(0 as i64);
+        }
+        return expandNode(items[0], env);
+      }
+      env.errors.push("macro-first: argument is not a macro list");
+      return new IntNode(0 as i64);
+    }
+
+    // ── (macro-rest list) — tail of a compile-time list ───────────────────
+    if (name == "macro-rest") {
+      const inner = expandNode(list.children[1], env);
+      if (inner.tag == TAG_MACROLIST) {
+        const items = (inner as MacroListNode).items;
+        const rest  = new Array<Node>();
+        for (let k = 1; k < items.length; k++) rest.push(items[k]);
+        return new MacroListNode(rest);
+      }
+      env.errors.push("macro-rest: argument is not a macro list");
+      return new IntNode(0 as i64);
+    }
+
+    // ── (macro-if cond then else?) — compile-time conditional ──────────────
+    // Only the taken branch is expanded (enables recursive macros to terminate).
+    if (name == "macro-if") {
+      const condNode = expandNode(list.children[1], env);
+      const cv = evalConstInt(condNode);
+      if (cv == null) {
+        env.errors.push("macro-if: condition is not a compile-time integer");
+        return new IntNode(0 as i64);
+      }
+      if (cv!.value != 0) return expandNode(list.children[2], env);
+      if (list.children.length > 3) return expandNode(list.children[3], env);
+      return new IntNode(0 as i64);
+    }
+
+    // ── (macro-seq expr...) — sequence side-effectful expressions ───────────
+    // With 0 exprs → 0. With 1 expr → that expr. With N → (let __macro_seq :i32 0 ...)
+    if (name == "macro-seq") {
+      if (list.children.length <= 1) return new IntNode(0 as i64);
+      if (list.children.length == 2) return expandNode(list.children[1], env);
+      const seq = new ListNode();
+      seq.children.push(new SymbolNode("let"));
+      seq.children.push(new SymbolNode("__macro_seq"));
+      seq.children.push(new SymbolNode(":i32"));
+      seq.children.push(new IntNode(0 as i64));
+      for (let k = 1; k < list.children.length; k++) seq.children.push(list.children[k]);
+      return expandNode(seq, env);
+    }
   }
 
   // Not a macro call — recursively expand children
@@ -70,10 +213,17 @@ function expandNode(node: Node, env: Env): Node {
 }
 
 // Substitute macro params with actual args in the macro body template.
+// Fixed params are bound by position; the rest param (if any) is bound to
+// a MacroListNode wrapping all remaining args.
 function expandMacroCall(macro: MacroInfo, args: Array<Node>, env: Env): Node {
   const subst = new Map<string, Node>();
   for (let i = 0; i < macro.params.length; i++) {
-    subst.set(macro.params[i], args[i]);
+    if (i < args.length) subst.set(macro.params[i], args[i]);
+  }
+  if (macro.restParam != "") {
+    const restItems = new Array<Node>();
+    for (let i = macro.params.length; i < args.length; i++) restItems.push(args[i]);
+    subst.set(macro.restParam, new MacroListNode(restItems));
   }
   return substituteNode(macro.body, subst, env);
 }
@@ -88,6 +238,14 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
   if (node.tag == TAG_STRING) {
     internString((node as StringNode).value, env);
     return new SymbolNode("__str:" + (node as StringNode).value);
+  }
+  // MacroListNodes: recursively substitute inside each item.
+  if (node.tag == TAG_MACROLIST) {
+    const ml = node as MacroListNode;
+    const newItems = new Array<Node>();
+    for (let k = 0; k < ml.items.length; k++)
+      newItems.push(substituteNode(ml.items[k], subst, env));
+    return new MacroListNode(newItems);
   }
   if (node.tag == TAG_SYMBOL) {
     const name = (node as SymbolNode).name;
@@ -178,17 +336,29 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
       continue;
     }
 
-    // ── (defmacro name (params...) body) ────────────────────────────────────
+    // ── (defmacro name (params... [. rest]) body) ──────────────────────────
     if (headName == "defmacro") {
       // children: [defmacro, name, (params...), body]
-      const macroName   = (list.children[1] as SymbolNode).name;
-      const paramsNode  = list.children[2] as ListNode;
-      const bodyNode    = list.children[3];
-      const params      = new Array<string>();
+      // Params may end with ". restName" to capture variadic trailing args.
+      const macroName  = (list.children[1] as SymbolNode).name;
+      const paramsNode = list.children[2] as ListNode;
+      const bodyNode   = list.children[3];
+      const params     = new Array<string>();
+      let   restParam  = "";
       for (let j = 0; j < paramsNode.children.length; j++) {
-        params.push((paramsNode.children[j] as SymbolNode).name);
+        if (paramsNode.children[j].tag != TAG_SYMBOL) {
+          env.errors.push("defmacro " + macroName + ": param " + j.toString() + " is not a symbol");
+          break;
+        }
+        const pname = (paramsNode.children[j] as SymbolNode).name;
+        if (pname.startsWith("...")) {
+          // ...name — variadic rest parameter; collects all remaining args
+          restParam = pname.slice(3);
+          break;
+        }
+        params.push(pname);
       }
-      env.macros.set(macroName, new MacroInfo(params, bodyNode));
+      env.macros.set(macroName, new MacroInfo(params, restParam, bodyNode));
       continue;
     }
 

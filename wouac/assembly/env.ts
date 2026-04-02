@@ -65,11 +65,13 @@ export class FieldInfo {
 
 // Info stored for each (defmacro ...) declaration
 export class MacroInfo {
-  params: Array<string>; // parameter names
-  body: Node;            // template body (a single expression)
-  constructor(params: Array<string>, body: Node) {
-    this.params = params;
-    this.body = body;
+  params:    Array<string>; // fixed parameter names
+  restParam: string;        // name of the variadic rest param, or "" if none
+  body:      Node;          // template body (a single expression)
+  constructor(params: Array<string>, restParam: string, body: Node) {
+    this.params    = params;
+    this.restParam = restParam;
+    this.body      = body;
   }
 }
 

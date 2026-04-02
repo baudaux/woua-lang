@@ -27,7 +27,7 @@ import { expandFieldGet, expandFieldSet } from "./macros";
 import {
   watI32Const, watF32Const, watF64Const, watI64Const,
   watLocalGet, watLocalSet, watLocalDecl,
-  watI32Store, watI32Store8, watI32Load8u,
+  watI32Store, watI32Store8, watI32Load, watI32Load8u,
   watIf, watBlock, watLoop, watBrIf, watBr,
   watCall, watDrop, watReturn,
 } from "./primitives";
@@ -110,8 +110,10 @@ function assembleModule(env: Env): string {
   out += "  (global $heap_ptr (mut i32) (i32.const " + alignedHeap.toString() + "))\n\n";
   out += "  (func $alloc (param $size i32) (result i32)\n";
   out += "    (local $ptr i32)\n";
+  out += "    (local $aligned i32)\n";
   out += "    (local.set $ptr (global.get $heap_ptr))\n";
-  out += "    (global.set $heap_ptr (i32.add (local.get $ptr) (local.get $size)))\n";
+  out += "    (local.set $aligned (i32.and (i32.add (local.get $size) (i32.const 3)) (i32.const -4)))\n";
+  out += "    (global.set $heap_ptr (i32.add (local.get $ptr) (local.get $aligned)))\n";
   out += "    (local.get $ptr)\n";
   out += "  )\n\n";
 
@@ -550,6 +552,10 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     return watI32Store8(ptr, val);
   }
 
+  // ── (i32.load ptr) — 4-byte read → i32 ─────────────────────────
+  if (op == "i32.load") {
+    return watI32Load(codegenExpr(list.children[1], env, locals));
+  }
   // ── (i32.load8_u ptr) — unsigned single-byte read ──────────────
   if (op == "i32.load8_u") {
     return watI32Load8u(codegenExpr(list.children[1], env, locals));

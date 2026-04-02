@@ -1,0 +1,111 @@
+;; String utility library — functions for comparing, slicing, copying,
+;; concatenating, and searching strings.
+;;
+;; String is a (ptr :ptr, len :i32) struct defined in core.woua.
+;; All functions operate on heap-allocated String structs.
+;;
+;; Include:
+;;   (include string)   ;; pulls in core.woua transitively
+
+(include core)
+
+;; ── Accessors ────────────────────────────────────────────────────────────────
+
+;; (string-len s) → i32  byte length of s
+(defmacro string-len (s)
+  (String/len s))
+
+;; (string-ptr s) → ptr  raw data pointer of s
+(defmacro string-ptr (s)
+  (String/ptr s))
+
+;; ── Comparison ───────────────────────────────────────────────────────────────
+
+;; (string= a b) → i32
+;; Returns 1 if a and b have identical content, 0 otherwise.
+(defn string= (a :String b :String)
+  (if (= (String/len a) (String/len b))
+    (let n   :i32 (String/len a)
+      (let pa  :i32 (String/ptr a)
+        (let pb  :i32 (String/ptr b)
+          (let i   :i32 0
+            (let eq  :i32 1
+              (while (< i n)
+                (if (= (i32.load8_u (+ pa i)) (i32.load8_u (+ pb i)))
+                  (set! i (+ i 1))
+                  (let _d :i32 0
+                    (set! eq 0)
+                    (set! i n))))
+              eq)))))
+    0))
+
+;; (string-eq s "literal") → i32
+;; Compare a runtime String with a compile-time string literal.
+(defmacro string-eq (s lit)
+  (string= s (string lit)))
+
+;; ── Copying ──────────────────────────────────────────────────────────────────
+
+;; (string-copy s) → String
+;; Allocate a fresh buffer and copy s into it.
+(defn string-copy (s :String)
+  (let n   :i32 (String/len s)
+    (let buf :ptr (alloc n)
+      (let i  :i32 0
+        (while (< i n)
+          (i32.store8 (+ buf i) (i32.load8_u (+ (String/ptr s) i)))
+          (set! i (+ i 1)))
+        (let result :String (alloc (sizeof String))
+          (String/ptr! result buf)
+          (String/len! result n)
+          result)))))
+
+;; ── Slicing ──────────────────────────────────────────────────────────────────
+
+;; (string-slice s offset len) → String
+;; Return a new String header pointing into s's buffer at the given offset.
+;; No data is copied. offset + len must not exceed (string-len s).
+(defn string-slice (s :String offset len)
+  (let result :String (alloc (sizeof String))
+    (String/ptr! result (+ (String/ptr s) offset))
+    (String/len! result len)
+    result))
+
+;; ── Concatenation ────────────────────────────────────────────────────────────
+
+;; (string-concat a b) → String
+;; Allocate a new buffer containing the bytes of a followed by the bytes of b.
+(defn string-concat (a :String b :String)
+  (let la  :i32 (String/len a)
+    (let lb  :i32 (String/len b)
+      (let buf :ptr (alloc (+ la lb))
+        (let i  :i32 0
+          (while (< i la)
+            (i32.store8 (+ buf i) (i32.load8_u (+ (String/ptr a) i)))
+            (set! i (+ i 1)))
+          (set! i 0)
+          (while (< i lb)
+            (i32.store8 (+ buf (+ la i)) (i32.load8_u (+ (String/ptr b) i)))
+            (set! i (+ i 1)))
+          (let result :String (alloc (sizeof String))
+            (String/ptr! result buf)
+            (String/len! result (+ la lb))
+            result))))))
+
+;; ── Searching ────────────────────────────────────────────────────────────────
+
+;; (string-index-of-byte s b) → i32
+;; Return the index of the first occurrence of byte value b in s,
+;; or -1 if not found.
+(defn string-index-of-byte (s :String b)
+  (let n     :i32 (String/len s)
+    (let p     :i32 (String/ptr s)
+      (let i     :i32 0
+        (let found :i32 -1
+          (while (< i n)
+            (if (= (i32.load8_u (+ p i)) b)
+              (let _d :i32 0
+                (set! found i)
+                (set! i n))
+              (set! i (+ i 1))))
+          found)))))

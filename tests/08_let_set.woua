@@ -3,10 +3,9 @@
 ;; Verifies that let-bindings are mutable via set!.
 ;; Expected output: 30
 
-(include std_io)
+(include io)
 
 (defn main ()
   (let x :i32 10
     (set! x (+ x 20))
-    (print-int x)
-    (print "\n")))
+    (printf "%d\n" x)))

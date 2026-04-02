@@ -1,10 +1,11 @@
 // AST node tags
-export const TAG_INT    : i32 = 0;
-export const TAG_FLOAT  : i32 = 1;
-export const TAG_SYMBOL : i32 = 2;
-export const TAG_STRING : i32 = 3;
-export const TAG_LIST   : i32 = 4;
-export const TAG_REGEX  : i32 = 5;
+export const TAG_INT       : i32 = 0;
+export const TAG_FLOAT     : i32 = 1;
+export const TAG_SYMBOL    : i32 = 2;
+export const TAG_STRING    : i32 = 3;
+export const TAG_LIST      : i32 = 4;
+export const TAG_REGEX     : i32 = 5;
+export const TAG_MACROLIST : i32 = 6; // compile-time list of nodes (variadic macro args)
 
 // Base node — all AST nodes carry a tag for dynamic dispatch
 export class Node {
@@ -42,6 +43,16 @@ export class StringNode extends Node {
 export class RegexNode extends Node {
   pattern: string;
   constructor(p: string) { super(TAG_REGEX); this.pattern = p; }
+}
+
+// Compile-time list of nodes — produced by variadic macro rest params.
+// Never reaches codegen; consumed entirely by macro intrinsics.
+export class MacroListNode extends Node {
+  items: Array<Node>;
+  constructor(items: Array<Node>) {
+    super(TAG_MACROLIST);
+    this.items = items;
+  }
 }
 
 // List:  (defn add (a b) (+ a b))

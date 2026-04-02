@@ -1,0 +1,113 @@
+{
+  "name": "woua",
+  "scopeName": "source.woua",
+  "fileTypes": ["woua"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#regex" },
+    { "include": "#number" },
+    { "include": "#type-annotation" },
+    { "include": "#keyword" },
+    { "include": "#builtin-op" },
+    { "include": "#builtin-fn" },
+    { "include": "#definition-name" },
+    { "include": "#parens" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.semicolon.woua",
+      "match": ";.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.woua",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.woua",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "regex": {
+      "name": "string.regexp.woua",
+      "begin": "/",
+      "end": "/",
+      "patterns": [
+        {
+          "name": "constant.character.escape.woua",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.woua",
+          "match": "\\b0x[0-9a-fA-F]+(i64)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.woua",
+          "match": "-?[0-9]*\\.[0-9]+(f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.woua",
+          "match": "-?[0-9]+(i64)?\\b"
+        }
+      ]
+    },
+    "type-annotation": {
+      "name": "entity.name.type.woua",
+      "match": ":[a-zA-Z_][a-zA-Z0-9_]*"
+    },
+    "keyword": {
+      "name": "keyword.control.woua",
+      "match": "\\b(if|while|let|set!|drop|as|include)\\b"
+    },
+    "builtin-op": {
+      "name": "storage.type.woua",
+      "match": "\\b(defn|defmacro|deftype|defop|defimport|defliteral|defstatic)\\b"
+    },
+    "builtin-fn": {
+      "name": "support.function.builtin.woua",
+      "match": "\\b(alloc|sizeof|static-ptr|static-len|call|i32\\.store|i32\\.store8|i32\\.load|i32\\.load8_u)\\b"
+    },
+    "definition-name": {
+      "patterns": [
+        {
+          "comment": "Function name after defn",
+          "match": "(?<=\\(defn\\s)[a-zA-Z_/!?<>=+\\-*][a-zA-Z0-9_/!?<>=+\\-*]*",
+          "name": "entity.name.function.woua"
+        },
+        {
+          "comment": "Macro name after defmacro",
+          "match": "(?<=\\(defmacro\\s)[a-zA-Z_/!?<>=+\\-*][a-zA-Z0-9_/!?<>=+\\-*]*",
+          "name": "entity.name.function.woua"
+        },
+        {
+          "comment": "Type name after deftype",
+          "match": "(?<=\\(deftype\\s)[a-zA-Z_][a-zA-Z0-9_]*",
+          "name": "entity.name.class.woua"
+        },
+        {
+          "comment": "Static name after defstatic",
+          "match": "(?<=\\(defstatic\\s)[a-zA-Z_][a-zA-Z0-9_]*",
+          "name": "variable.other.constant.woua"
+        },
+        {
+          "comment": "Import name after defimport",
+          "match": "(?<=\\(defimport\\s)[a-zA-Z_][a-zA-Z0-9_]*",
+          "name": "entity.name.function.woua"
+        }
+      ]
+    },
+    "parens": {
+      "begin": "\\(",
+      "end": "\\)",
+      "patterns": [
+        { "include": "$self" }
+      ]
+    }
+  }
+}

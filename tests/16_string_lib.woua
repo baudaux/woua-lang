@@ -1,0 +1,35 @@
+;; Test: string library
+;; Exercises string=, string-eq, string-copy, string-slice,
+;; string-concat, string-index-of-byte.
+;; Expected output:
+;;   eq: 1
+;;   neq: 0
+;;   lit-eq: 1
+;;   copy-eq: 1
+;;   slice: wor
+;;   concat: helloworld
+;;   index: 4
+
+(include io)
+(include string)
+
+(defn main ()
+  (let a :String (string "hello")
+    (let b :String (string "hello")
+      (let c :String (string "world")
+        ;; string=
+        (printf "eq: %d\n" (string= a b))
+        (printf "neq: %d\n" (string= a c))
+        ;; string-eq with literal
+        (printf "lit-eq: %d\n" (string-eq a "hello"))
+        ;; string-copy
+        (let a2 :String (string-copy a)
+          (printf "copy-eq: %d\n" (string= a a2)))
+        ;; string-slice — "world"[0..3] = "wor"
+        (let sl :String (string-slice c 0 3)
+          (printf "slice: %s\n" sl))
+        ;; string-concat
+        (let cat :String (string-concat a c)
+          (printf "concat: %s\n" cat))
+        ;; string-index-of-byte — 'o' = 111 in "hello" → index 4
+        (printf "index: %d\n" (string-index-of-byte a 111)))))

@@ -1,0 +1,15 @@
+;; Demo: echo stdin lines until the user types "quit".
+;; Reads one line at a time, prints it back, exits on "quit".
+
+(include io)
+
+(defn main ()
+  (let buf     :ptr (alloc 256)
+    (let running :i32 1
+      (while running
+        (let line :String (read-line 0 buf 256)
+          (if (string-eq line "quit")
+            (set! running 0)
+            (let _d :i32 0
+              (print-string line)
+              (print "\n"))))))))

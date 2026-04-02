@@ -79,9 +79,10 @@ export class Reader {
   // are the same character (the first char of the pattern), with \ escaping.
   // For :string literals, interns the value into linear memory immediately and
   // returns a StringNode (still needed by defimport / defstatic at compile time).
+  // For :char literals, returns an IntNode with the Unicode code point.
 
-  private readLiteral(info: LiteralInfo): StringNode {
-    const delim = info.pattern.charAt(0); // e.g. '"'
+  private readLiteral(info: LiteralInfo): Node {
+    const delim = info.pattern.charAt(0); // e.g. '"' or "'"
     this.pos++; // consume opening delimiter
     let value = "";
     while (this.pos < this.src.length) {
@@ -95,12 +96,17 @@ export class Reader {
         else if (esc == "r")    value += "\r";
         else if (esc == "\\")   value += "\\";
         else if (esc == delim)  value += delim;
+        else if (esc == "0")    value += "\0";
         else                    value += esc;
         this.pos++;
       } else {
         value += c;
         this.pos++;
       }
+    }
+    if (info.nodeType == ":char") {
+      const code = value.length > 0 ? value.charCodeAt(0) : 0;
+      return new IntNode(code as i64);
     }
     return new StringNode(value);
   }
