@@ -1,6 +1,6 @@
-;; Test: char literal
-;; 'A' → 65, '\n' → 10, '\'' → 39, '\0' → 0
-;; Expected output:
+;; @test char-literal
+;; @feature character literal syntax for printable, escape, and special characters
+;; @expect
 ;;   65
 ;;   10
 ;;   39

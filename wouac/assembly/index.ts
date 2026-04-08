@@ -6,13 +6,174 @@
 //   wasmtime wouac.wasm < source.woua
 //   wasmtime wouac.wasm < source.woua > output.wat
 
-import { Console, Process, CommandLine, FileSystem } from "as-wasi/assembly";
+import { Console, Process, CommandLine } from "as-wasi/assembly";
+import {
+  fd_prestat_get, fd_prestat_dir_name, path_open, fd_close, fd_read, fd_write,
+  errno, oflags, rights, fdflags, lookupflags, fd, prestat, prestat_dir,
+} from "@assemblyscript/wasi-shim/assembly/bindings/wasi_snapshot_preview1";
 import { Node, ListNode, SymbolNode, RegexNode,
          TAG_LIST, TAG_SYMBOL, TAG_REGEX } from "./ast";
 import { Reader } from "./reader";
 import { Env, LiteralInfo } from "./env";
 import { expandAll } from "./expander";
 import { generateModule } from "./codegen";
+
+// ── Preopened-directory file open ────────────────────────────────────────────
+//
+// as-wasi's FileSystem.open() hardcodes dirfd=3, which only works when exactly
+// one --dir is passed to wasmtime. We replace it with openPath(), which scans
+// all preopened fds (starting at 3), finds the best-matching prefix for the
+// requested path, and calls path_open with the relative portion of the path.
+//
+// Returns a WASI fd on success, or -1 on failure.
+
+function openPath(path: string, write: bool): i32 {
+  const pathUTF8Buf = String.UTF8.encode(path);
+  const pathPtr     = changetype<usize>(pathUTF8Buf);
+  const pathLen     = pathUTF8Buf.byteLength as usize;
+
+  // Buffer for fd_prestat (8 bytes: type:u32 + pr_name_len:u32)
+  let prestatBuf = memory.data(8);
+  // Buffer for preopened dir name (up to 4096 bytes)
+  let nameBufSize: usize = 4096;
+  // @ts-ignore
+  let nameBuf = heap.alloc(nameBufSize);
+
+  let bestFd:      i32 = -1;
+  let bestPrefLen: i32 = -1;
+
+  for (let tryFd: i32 = 3; ; tryFd++) {
+    let ret = fd_prestat_get(tryFd as fd, changetype<prestat>(prestatBuf));
+    if (ret !== errno.SUCCESS) break; // no more preopened fds
+
+    let prNameLen = load<u32>(prestatBuf + 4) as usize;
+    if (prNameLen > nameBufSize) {
+      // @ts-ignore
+      nameBuf = heap.realloc(nameBuf, prNameLen);
+      nameBufSize = prNameLen;
+    }
+    fd_prestat_dir_name(tryFd as fd, nameBuf, prNameLen);
+
+    // Decode the preopened dir name to compare against the requested path.
+    // A preopened dir of "." matches everything (prefix length = 0).
+    let preDir = String.UTF8.decodeUnsafe(nameBuf, prNameLen, true);
+    let isMatch = false;
+    let relativeStart = 0;
+
+    if (preDir == "." || preDir == "") {
+      // The dot-preopen matches all relative paths
+      isMatch = true;
+      relativeStart = 0;
+    } else {
+      // Strip trailing slash from preDir for comparison
+      if (preDir.endsWith("/")) preDir = preDir.slice(0, preDir.length - 1);
+      if (path.startsWith(preDir + "/")) {
+        isMatch = true;
+        relativeStart = preDir.length + 1; // skip "preDir/"
+      } else if (path == preDir) {
+        isMatch = true;
+        relativeStart = preDir.length;
+      }
+    }
+
+    if (isMatch && preDir.length > bestPrefLen) {
+      bestFd       = tryFd;
+      bestPrefLen  = preDir == "." || preDir == "" ? 0 : preDir.length;
+    }
+  }
+
+  // @ts-ignore
+  heap.free(nameBuf);
+
+  if (bestFd < 0) return -1;
+
+  // Build the relative path for path_open.
+  // If bestPrefLen == 0 (dot-preopen), the path is already relative.
+  // Otherwise strip the "preDir/" prefix.
+  let relPath = bestPrefLen > 0 ? path.slice(bestPrefLen + 1) : path;
+  // Remove any leading "./" that might remain
+  if (relPath.startsWith("./")) relPath = relPath.slice(2);
+
+  let relUTF8     = String.UTF8.encode(relPath);
+  let relPtr      = changetype<usize>(relUTF8);
+  let relLen      = relUTF8.byteLength as usize;
+
+  let fdRights: u64 = write
+    ? (rights.FD_WRITE | rights.FD_SEEK | rights.FD_TELL | rights.FD_FILESTAT_GET | rights.PATH_CREATE_FILE)
+    : (rights.FD_READ  | rights.FD_SEEK | rights.FD_TELL | rights.FD_FILESTAT_GET);
+  let oflagsVal: u16 = write ? (oflags.CREAT | oflags.TRUNC) : 0;
+
+  let fdOut = memory.data(8);
+  let res   = path_open(
+    bestFd as fd,
+    lookupflags.SYMLINK_FOLLOW,
+    relPtr, relLen,
+    oflagsVal,
+    fdRights, fdRights,
+    0 as fdflags,
+    fdOut,
+  );
+  if (res !== errno.SUCCESS) return -1;
+  return load<u32>(fdOut) as i32;
+}
+
+// Wrap openPath for reading: returns a string or null
+function readPathString(path: string): string | null {
+  let rawFd = openPath(path, false);
+  if (rawFd < 0) return null;
+
+  let result  = "";
+  let chunkSz: usize = 4096;
+  // @ts-ignore
+  let buf    = heap.alloc(chunkSz);
+  // @ts-ignore
+  let iov    = heap.alloc(8);
+  // @ts-ignore
+  let nrBuf  = heap.alloc(4);
+
+  while (true) {
+    store<u32>(iov,     buf as u32);
+    store<u32>(iov + 4, chunkSz as u32);
+    // @ts-ignore
+    let ret = fd_read(rawFd as fd, iov, 1, nrBuf);
+    if (ret !== errno.SUCCESS) break;
+    let n = load<u32>(nrBuf) as usize;
+    if (n == 0) break;
+    result += String.UTF8.decodeUnsafe(buf, n, false);
+  }
+  // @ts-ignore
+  heap.free(buf);
+  // @ts-ignore
+  heap.free(iov);
+  // @ts-ignore
+  heap.free(nrBuf);
+  fd_close(rawFd as fd);
+  return result;
+}
+
+// Wrap openPath for writing
+function writePathString(path: string, content: string): bool {
+  let rawFd = openPath(path, true);
+  if (rawFd < 0) return false;
+
+  let encoded = String.UTF8.encode(content);
+  let ptr     = changetype<usize>(encoded);
+  let len     = encoded.byteLength as usize;
+  // @ts-ignore
+  let iov   = heap.alloc(8);
+  // @ts-ignore
+  let nwBuf = heap.alloc(4);
+  store<u32>(iov,     ptr as u32);
+  store<u32>(iov + 4, len as u32);
+  // @ts-ignore
+  fd_write(rawFd as fd, iov, 1, nwBuf);
+  // @ts-ignore
+  heap.free(iov);
+  // @ts-ignore
+  heap.free(nwBuf);
+  fd_close(rawFd as fd);
+  return true;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -33,12 +194,12 @@ function withExtension(name: string): string {
 function resolveIncludePath(name: string, baseDir: string, libDir: string): string {
   const withExt = withExtension(name);
   const fromBase = baseDir + withExt;
-  const fd1 = FileSystem.open(fromBase, "r");
-  if (fd1 != null) return fromBase;
+  let probeFd = openPath(fromBase, false);
+  if (probeFd >= 0) { fd_close(probeFd as fd); return fromBase; }
   if (libDir != "") {
     const fromLib = libDir + withExt;
-    const fd2 = FileSystem.open(fromLib, "r");
-    if (fd2 != null) return fromLib;
+    probeFd = openPath(fromLib, false);
+    if (probeFd >= 0) { fd_close(probeFd as fd); return fromLib; }
   }
   return "";
 }
@@ -72,13 +233,14 @@ function tryRegisterDefliteral(form: Node, env: Env): void {
 //
 function readAndResolve(
   src:      string,
+  filename: string,
   baseDir:  string,
   libDir:   string,
   included: Set<string>,
   env:      Env,
 ): Array<Node> {
   const result = new Array<Node>();
-  const reader = new Reader(src, env);
+  const reader = new Reader(src, env, filename != "" ? filename : "<stdin>");
 
   while (reader.hasMore()) {
     const form = reader.readNextForm();
@@ -96,18 +258,13 @@ function readAndResolve(
           env.errors.push("include: cannot find '" + name + "' in '" + baseDir + "' or '" + libDir + "'");
         } else if (!included.has(absPath)) {
           included.add(absPath);
-          const fd = FileSystem.open(absPath, "r");
-          if (fd == null) {
+          const incSrc = readPathString(absPath);
+          if (incSrc == null) {
             env.errors.push("include: cannot open file: " + absPath);
           } else {
-            const incSrc = fd!.readString();
-            if (incSrc == null) {
-              env.errors.push("include: failed to read file: " + absPath);
-            } else {
-              const subForms = readAndResolve(
-                incSrc as string, dirName(absPath), libDir, included, env);
-              for (let j = 0; j < subForms.length; j++) result.push(subForms[j]);
-            }
+            const subForms = readAndResolve(
+              incSrc as string, absPath, dirName(absPath), libDir, included, env);
+            for (let j = 0; j < subForms.length; j++) result.push(subForms[j]);
           }
         }
         continue;
@@ -177,15 +334,9 @@ export function _start(): void {
   let source: string | null = null;
 
   if (inputArg != "") {
-    const fd = FileSystem.open(inputArg, "r");
-    if (fd == null) {
-      Console.error("wouac: cannot open file: " + inputArg);
-      Process.exit(1);
-      return;
-    }
-    source = fd!.readString();
+    source = readPathString(inputArg);
     if (source == null) {
-      Console.error("wouac: failed to read file: " + inputArg);
+      Console.error("wouac: cannot open file: " + inputArg + "\n");
       Process.exit(1);
       return;
     }
@@ -194,7 +345,7 @@ export function _start(): void {
   }
 
   if (source == null || (source as string).length == 0) {
-    Console.error("wouac: no input (provide a .woua file as argument or pipe to stdin)");
+    Console.error("wouac: no input (provide a .woua file as argument or pipe to stdin)\n");
     Process.exit(1);
     return;
   }
@@ -206,14 +357,14 @@ export function _start(): void {
   const included = new Set<string>();
   if (inputArg != "") included.add(inputArg);
 
-  const forms = readAndResolve(source as string, inputDir, libDir, included, env);
+  const forms = readAndResolve(source as string, inputArg != "" ? inputArg : "<stdin>", inputDir, libDir, included, env);
 
   const expanded = expandAll(forms, env);
 
   // Report any compile-time errors
   if (env.errors.length > 0) {
     for (let i = 0; i < env.errors.length; i++) {
-      Console.error("wouac: " + env.errors[i]);
+      Console.error("wouac: " + env.errors[i] + "\n");
     }
     Process.exit(1);
     return;
@@ -223,13 +374,11 @@ export function _start(): void {
 
   // -- Write WAT to stdout or file --------------------------------------------
   if (outputArg != "") {
-    const outFd = FileSystem.open(outputArg, "w");
-    if (outFd == null) {
-      Console.error("wouac: cannot open output file: " + outputArg);
+    if (!writePathString(outputArg, wat)) {
+      Console.error("wouac: cannot open output file: " + outputArg + "\n");
       Process.exit(1);
       return;
     }
-    outFd!.writeString(wat);
   } else {
     Console.log(wat);
   }

@@ -2,6 +2,81 @@
 
 **woua** is a low-level, Lisp-syntax language that compiles directly to [WebAssembly Text Format (WAT)](https://webassembly.github.io/spec/core/text/index.html) and targets [WASI Preview 1](https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md). It is designed to be as close to WAT as possible while remaining self-describing: operators, literal patterns, external imports, and struct types are all declared in `.woua` library files, not hardcoded in the compiler.
 
+## Building the compiler
+
+The compiler is written in [AssemblyScript](https://www.assemblyscript.org/) and compiles to a self-hosting WASI binary.
+
+```sh
+cd wouac
+npm install
+npm run build
+# Output: wouac/dist/wouac.wasm
+```
+
+## Running
+
+```sh
+# Compile a woua source file to WAT (stdout)
+wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua
+
+# Compile to a WAT file directly
+wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua -o demos/out/hello_world.wat
+
+# Compile and assemble to WASM
+wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua | wat2wasm - -o demos/out/hello_world.wasm
+wasmtime demos/out/hello_world.wasm
+
+# Use a custom library directory
+wasmtime --dir . --dir /path/to/lib wouac/dist/wouac.wasm --lib /path/to/lib demos/hello_world.woua
+
+# Read from stdin
+cat demos/hello_world.woua | wasmtime --dir . wouac/dist/wouac.wasm
+```
+
+### CLI options
+
+```
+Usage: wouac [options] [source.woua]
+
+  Compile a woua source file to WebAssembly Text Format (WAT).
+  If no file is given, source is read from stdin.
+
+Options:
+  source.woua         Input source file
+  -o, --output <file> Output file (default: stdout)
+  --lib <dir>         Library directory (default: lib/)
+  --help, -h          Show this help message
+  --version, -v       Show compiler version
+```
+
+## Running the tests
+
+```sh
+./run_tests.sh          # run all tests
+./run_tests.sh 07       # run only test 07
+./run_tests.sh -v       # run all tests with verbose command output
+./run_tests.sh -v 07    # run test 07 with verbose output
+```
+
+Each test file carries `@test`, `@feature`, and `@expect` (or `@expect-error`) annotations.
+The runner compiles each test with `wouac`, assembles with `wat2wasm`, runs with `wasmtime`,
+and checks the output against `@expect`.
+
+## Hello, World
+
+```woua
+(include std_io)
+
+(defn main ()
+  (print "Hello, World!\n"))
+```
+
+The include chain: `std_io` → `wasi_p1` → `core`.
+
+`core` registers the string literal pattern (`defliteral`), operators (`defop`), and the `String` type.  
+`wasi_p1` imports all WASI Preview 1 functions.  
+`std_io` defines `Iovec`, `write`, and `print`.
+
 ## Project structure
 
 ```
@@ -244,270 +319,3 @@ Defines the `Iovec` struct and I/O macros (includes `wasi_p1`):
 | `print-int64` | `(n)` | Print an i64 to stdout |
 | `print` | `(sym)` | Print a static/inline string literal to stdout |
 
-## Hello, World
-
-```woua
-(include std_io)
-
-(defn main ()
-  (print "Hello, World!\n"))
-```
-
-The include chain: `std_io` → `wasi_p1` → `core`.
-
-`core` registers all literal patterns and operators.  
-`wasi_p1` imports all WASI functions.  
-`std_io` defines `Iovec`, `write`, and the `print` family.
-
-## Building the compiler
-
-The compiler is written in [AssemblyScript](https://www.assemblyscript.org/) and compiles to a self-hosting WASI binary.
-
-```sh
-cd wouac
-npm install
-npm run asbuild
-# Output: wouac/dist/wouac.wasm
-```
-
-## Running
-
-```sh
-# Compile a woua source file to WAT (stdout)
-wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua
-
-# Compile to a WAT file directly
-wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua -o hello.wat
-
-# Compile and assemble to WASM
-wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua | wat2wasm - -o hello.wasm
-wasmtime hello.wasm
-
-# Use a custom library directory
-wasmtime --dir . wouac/dist/wouac.wasm --lib /path/to/lib demos/hello_world.woua
-
-# Read from stdin
-cat demos/hello_world.woua | wasmtime --dir . wouac/dist/wouac.wasm
-```
-
-### CLI options
-
-```
-Usage: wouac [options] [source.woua]
-
-  Compile a woua source file to WebAssembly Text Format (WAT).
-  If no file is given, source is read from stdin.
-
-Options:
-  source.woua         Input source file
-  -o, --output <file> Output file (default: stdout)
-  --lib <dir>         Library directory (default: lib/)
-  --help, -h          Show this help message
-  --version, -v       Show compiler version
-```
-
-
-## Project structure
-
-```
-woua/
-  lib/              Standard library (woua source)
-    core.woua         Operators (defop), literal recognition (defliteral)
-    wasi_p1.woua      All WASI Preview 1 function imports (defimport)
-    std_io.woua       Iovec type, write/print macros
-  demos/
-    hello_world.woua  Example program
-  wouac/            Compiler (AssemblyScript, compiles to WASM)
-    assembly/
-      index.ts        Entry point, include resolution, CLI
-      reader.ts       Tokeniser / parser
-      expander.ts     Macro expansion, compile-time evaluation
-      codegen.ts      WAT code generation
-      env.ts          Compiler environment (symbol tables)
-      ast.ts          AST node types
-      macros.ts       Built-in compile-time helpers
-      primitives.ts   WAT instruction emitters
-```
-
-## Compiler pipeline
-
-```
-source.woua
-    │
-    ▼ readAndResolve          (index.ts)
-    │  • reads one form at a time
-    │  • (include name) → recursively reads the file from baseDir or lib/
-    │  • (defliteral …) → registers the literal pattern in env immediately
-    │  • string literals are interned into linear memory as they are read
-    │
-    ▼ expandAll               (expander.ts)
-    │  • (defstatic …)  → allocates static data, emits (data …) directive
-    │  • (deftype …)    → registers struct layout in env.types
-    │  • (defmacro …)   → registers macro template in env.macros
-    │  • (defimport …)  → registers WASM import in env.imports
-    │  • (defop …)      → registers operator overload in env.ops
-    │  • (defliteral …) → registers literal pattern in env.literals
-    │  • user macros    → recursively expanded in-place
-    │  • (defn …)       → forwarded to codegen unchanged
-    │
-    ▼ generateModule          (codegen.ts)
-    │  • emits (import …) for each env.imports entry
-    │  • emits linear memory, static data, bump allocator
-    │  • compiles (defn …) bodies with type inference
-    │  • exports _start → main
-    │
-    ▼ WAT output
-```
-
-## Language reference
-
-### Comments
-```
-;; This is a line comment
-```
-
-### Including files
-```woua
-(include std_io)        ;; searches lib/ then current directory
-(include ../mylib/foo)  ;; relative path, .woua extension added automatically
-```
-
-### Declaring external functions (WASI / WASM imports)
-```woua
-(defimport fd_write "wasi_snapshot_preview1" "fd_write" (:i32 :i32 :i32 :i32) :i32)
-;;          ^name   ^wasm module              ^wasm field  ^param types          ^result
-;; void functions omit the result type:
-(defimport proc_exit "wasi_snapshot_preview1" "proc_exit" (:i32))
-```
-
-### Declaring operators
-Operators are declared in `.woua` files and map directly to WAT instructions. The same name can be declared for multiple types — the compiler selects the right overload via type inference.
-```woua
-(defop + "i32.add" (:i32 :i32) :i32)
-(defop + "f32.add" (:f32 :f32) :f32)
-(defop < "i32.lt_s" (:i32 :i32) :i32)
-```
-
-### Declaring literal patterns
-The reader has no hardcoded literal syntax. Literal types are declared with a regex pattern:
-```woua
-(defliteral string /"((?:[^"\\]|\\.)*)"/ :string)
-;;           ^name  ^regex (capture group 1 = value)  ^node type
-```
-When the reader encounters the opening delimiter character it uses the registered pattern to consume the literal. String literals are interned into linear memory immediately.
-
-### Declaring struct types
-```woua
-(deftype Iovec
-  (base :ptr)
-  (len  :i32))
-```
-Field types: `:i32` `:i64` `:f32` `:f64` `:ptr`.  
-`(sizeof Iovec)` resolves to the byte size at compile time.  
-Field accessors are generated automatically:
-```woua
-(Iovec/base ptr)       ;; getter → i32.load at ptr + offset
-(Iovec/base! ptr val)  ;; setter → i32.store at ptr + offset
-```
-
-### Declaring macros
-```woua
-(defmacro print (sym)
-  (write 1 (static-ptr sym) (static-len sym)))
-```
-Macros are expanded at compile time. `(static-ptr sym)` and `(static-len sym)` resolve to the linear-memory pointer and byte length of the named (or inline) static.
-
-### Static data
-```woua
-(defstatic greeting "Hello!")   ;; string in linear memory
-(defstatic counter :i32 0)      ;; scalar
-(defstatic buf :bytes 256)      ;; zeroed byte buffer
-```
-Inline string literals do not need `defstatic` — they are auto-interned:
-```woua
-(print "Hello!")  ;; no defstatic needed
-```
-
-### Functions
-```woua
-(defn add (a b)
-  (+ a b))
-
-(defn main ()
-  (print "Hello, World!\n"))
-```
-Parameter and return types are inferred. The function named `main` is exported as `_start`.
-
-### Expressions
-
-| Form | Description |
-|---|---|
-| `42` `-7` | i32 literal |
-| `3.14` | f32 literal |
-| `"text"` | string literal (auto-interned) |
-| `/pattern/` | regex literal (used in `defliteral`) |
-| `(op a b)` | operator call — overload selected by type inference |
-| `(if cond then else?)` | conditional |
-| `(let name val body...)` | local binding, type inferred |
-| `(let name :Type val body...)` | local binding with explicit type |
-| `(set! name val)` | assign to local |
-| `(call name args...)` | explicit function call |
-| `(drop expr)` | discard a value |
-| `(as :Type expr)` | type cast (no-op in WAT — ptr types are i32) |
-| `(i32.store ptr val)` | raw memory write |
-| `(Type/field ptr)` | struct field getter |
-| `(Type/field! ptr val)` | struct field setter |
-| `(sizeof Type)` | compile-time struct size |
-| `(static-ptr sym)` | compile-time pointer to a static |
-| `(static-len sym)` | compile-time byte length of a static |
-| `(alloc size)` | runtime bump allocator, returns pointer |
-
-### Types
-
-| Keyword | WAT type | Notes |
-|---|---|---|
-| `:i32` | `i32` | 32-bit integer |
-| `:i64` | `i64` | 64-bit integer |
-| `:f32` | `f32` | 32-bit float |
-| `:f64` | `f64` | 64-bit float |
-| `:ptr` | `i32` | pointer (alias for :i32) |
-| `:TypeName` | `i32` | struct instance (heap pointer) |
-
-## Hello, World
-
-```woua
-(include std_io)
-
-(defn main ()
-  (print "Hello, World!\n"))
-```
-
-The include chain: `std_io` → `wasi_p1` → `core`.
-
-`core` registers the string literal pattern (`defliteral`), operators (`defop`), and the `String` type.  
-`wasi_p1` imports all WASI Preview 1 functions.  
-`std_io` defines `Iovec`, `write`, and `print`.
-
-## Building the compiler
-
-The compiler is written in [AssemblyScript](https://www.assemblyscript.org/) and compiles to a self-hosting WASI binary.
-
-```sh
-cd wouac
-npm install
-npm run asbuild
-```
-
-## Running
-
-```sh
-# Compile a woua source file to WAT
-wasmtime wouac.wasm demos/hello_world.woua
-
-# Pipe to wat2wasm and run
-wasmtime wouac.wasm demos/hello_world.woua | wat2wasm - -o hello.wasm
-wasmtime hello.wasm
-
-# Custom lib directory
-wasmtime wouac.wasm --lib /path/to/lib demos/hello_world.woua
-```

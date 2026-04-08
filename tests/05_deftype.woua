@@ -1,7 +1,6 @@
-;; Test: deftype + field accessors
-;; Declares a struct type with two fields, allocates it on the heap,
-;; sets and reads each field by name using the generated accessor macros.
-;; Expected output:
+;; @test deftype
+;; @feature declare a struct type and access fields via generated accessor macros
+;; @expect
 ;;   x: 10
 ;;   y: 20
 

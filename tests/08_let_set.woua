@@ -1,7 +1,6 @@
-;; Test: let + set!
-;; Declares a local variable with let, then mutates it with set!.
-;; Verifies that let-bindings are mutable via set!.
-;; Expected output: 30
+;; @test let-set
+;; @feature declare local variables with let and mutate them with set!
+;; @expect 30
 
 (include io)
 

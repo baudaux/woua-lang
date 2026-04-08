@@ -1,6 +1,6 @@
-;; Test: i32.store8 / i32.load8_u
-;; Writes individual bytes into an allocated buffer and reads them back.
-;; Expected output: ABC
+;; @test store8-load8
+;; @feature write and read individual bytes with i32.store8 / i32.load8_u
+;; @expect ABC
 
 (include io)
 

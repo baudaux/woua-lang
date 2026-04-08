@@ -62,7 +62,7 @@ export function expandDefstatic(args: Array<Node>, env: Env): string {
     env.statics.set(name, new StaticInfo(ptr, -1, typeName));
 
     // Optional inline initial value → emit a (data ...) directive
-    if (args.length >= 3 && typeName == ":i32" || typeName == ":ptr") {
+    if (args.length >= 3 && (typeName == ":i32" || typeName == ":ptr")) {
       const val = i32((args[2] as IntNode).value);
       env.dataEntries.push(
         "(data (i32.const " + ptr.toString() + ") " + encodeI32LE(val) + ")"

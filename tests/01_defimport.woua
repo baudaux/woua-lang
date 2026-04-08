@@ -1,7 +1,6 @@
-;; Test: defimport
-;; Declares fd_write and proc_exit directly (no std_io/wasi_p1 include)
-;; and uses them to write a line to stdout.
-;; Expected output: defimport ok
+;; @test defimport
+;; @feature declare WASI imports, struct types, and static strings without the io library
+;; @expect defimport ok
 
 (include core)
 

@@ -1,8 +1,6 @@
-;; Test: defliteral
-;; Exercises every numeric literal form declared in core.woua:
-;;   int (:i32), negative int, int64 (:i64 with i64 suffix), float (:f32), float value,
-;;   float64 (:f64 with f64 suffix), hex (:i32 with 0x prefix), hex64, string (:string :static).
-;; Expected output:
+;; @test defliteral
+;; @feature all numeric and string literal forms (int, i64, f32, f64, hex, hex64, string)
+;; @expect
 ;;   int ok
 ;;   neg ok
 ;;   i64 ok

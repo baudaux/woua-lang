@@ -108,3 +108,45 @@
             (String/ptr! s buf)
             (String/len! s len)
             s))))))
+
+;; ── Command-line arguments ────────────────────────────────────────────────────
+
+;; Internal cache: populated once on first use (0 = not yet loaded).
+(defstatic __args_argc :i32)
+(defstatic __args_argv :ptr)
+(defstatic __args_buf  :ptr)
+
+;; Load args from WASI once and store into the static cache.
+(defn __args-init ()
+  (if (= (i32.load (static-ptr __args_argv)) 0)
+    (let argc_slot :ptr (alloc 4)
+      (let buf_slot  :ptr (alloc 4)
+        (drop (args_sizes_get argc_slot buf_slot))
+        (let argc   :i32 (i32.load argc_slot)
+          (let buf_sz :i32 (i32.load buf_slot)
+            (let argv :ptr (alloc (* argc 4))
+              (let buf  :ptr (alloc buf_sz)
+                (drop (args_get argv buf))
+                (i32.store (static-ptr __args_argc) argc)
+                (i32.store (static-ptr __args_argv) argv)
+                (i32.store (static-ptr __args_buf)  buf)))))))))
+
+;; (args-count) → i32
+;; Returns the number of command-line arguments (including argv[0]).
+(defn args-count ()
+  (__args-init)
+  (i32.load (static-ptr __args_argc)))
+
+;; (args-get i) → String
+;; Returns the i-th command-line argument as a String.
+(defn args-get (i :i32)
+  (__args-init)
+  (let argv :ptr (i32.load (static-ptr __args_argv))
+    (let p :ptr (i32.load (+ argv (* i 4)))
+      (let n :i32 0
+        (while (i32.load8_u (+ p n))
+          (set! n (+ n 1)))
+        (let s :String (alloc (sizeof String))
+          (String/ptr! s p)
+          (String/len! s n)
+          s)))))

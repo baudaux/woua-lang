@@ -9,14 +9,20 @@ import { Node, IntNode, FloatNode, SymbolNode, StringNode, RegexNode, ListNode }
 import { Env, LiteralInfo } from "./env";
 
 export class Reader {
-  private src:  string;
-  private pos:  i32;
-  private env:  Env;
+  private src:      string;
+  private pos:      i32;
+  private env:      Env;
+  private line:      i32;   // 1-based current line number
+  private lineStart: i32;   // pos of the first char on the current line (for column calc)
+  private filename:  string; // for error messages
 
-  constructor(src: string, env: Env) {
-    this.src = src;
-    this.pos = 0;
-    this.env = env;
+  constructor(src: string, env: Env, filename: string = "") {
+    this.src       = src;
+    this.pos       = 0;
+    this.env       = env;
+    this.line      = 1;
+    this.lineStart = 0;
+    this.filename  = filename;
   }
 
   // True if there are more non-whitespace forms to read.
@@ -46,6 +52,13 @@ export class Reader {
     this.skipWhitespace();
     const c = this.src.charAt(this.pos);
     if (c == "(") return this.readList();
+    if (c == ")") {
+      const col = this.pos - this.lineStart + 1;
+      const loc = this.filename != "" ? this.filename + ":" + this.line.toString() + ":" + col.toString() : "line " + this.line.toString() + ":" + col.toString();
+      this.env.errors.push(loc + ": unexpected ')' — no matching '('");
+      this.pos++; // consume it and continue
+      return new SymbolNode("<error>");
+    }
     // A '/' is a regex literal only when immediately followed by a non-space,
     // non-'/' character. A lone '/' or '/ ' is the division operator (symbol).
     if (c == "/") {
@@ -114,6 +127,8 @@ export class Reader {
   // -- List: (form form ...) --------------------------------------------------
 
   private readList(): ListNode {
+    const openLine = this.line;
+    const openCol  = this.pos - this.lineStart + 1;
     this.pos++; // consume '('
     const node = new ListNode();
     this.skipWhitespace();
@@ -121,7 +136,12 @@ export class Reader {
       node.children.push(this.readForm());
       this.skipWhitespace();
     }
-    this.pos++; // consume ')'
+    if (this.pos >= this.src.length) {
+      const loc = this.filename != "" ? this.filename + ":" + openLine.toString() + ":" + openCol.toString() : "line " + openLine.toString() + ":" + openCol.toString();
+      this.env.errors.push(loc + ": unmatched '(' — missing closing ')'");
+    } else {
+      this.pos++; // consume ')'
+    }
     return node;
   }
 
@@ -206,7 +226,8 @@ export class Reader {
   private skipWhitespace(): void {
     while (this.pos < this.src.length) {
       const c = this.src.charAt(this.pos);
-      if (c == " " || c == "\n" || c == "\r" || c == "\t") {
+      if (c == "\n") { this.line++; this.lineStart = this.pos + 1; this.pos++; continue; }
+      if (c == " " || c == "\r" || c == "\t") {
         this.pos++;
       } else if (c == ";") {
         // line comment -- skip to end of line

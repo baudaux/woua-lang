@@ -1,7 +1,6 @@
-;; Test: while loop
-;; Counts from 1 to 5, printing each value.
-;; Verifies the (while cond body...) form with set! mutation.
-;; Expected output:
+;; @test while
+;; @feature while loop with set! mutation counting from 1 to 5
+;; @expect
 ;;   1
 ;;   2
 ;;   3

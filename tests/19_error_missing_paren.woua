@@ -1,0 +1,8 @@
+;; @test error-missing-paren
+;; @feature compiler reports an error on unmatched opening parenthesis
+;; @expect-error
+
+(include io)
+
+(defn main ()
+  (printf "hello\n"   ;; missing closing paren

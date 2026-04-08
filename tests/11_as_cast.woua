@@ -1,7 +1,6 @@
-;; Test: as (type cast)
-;; Casts between numeric types using (as :Type expr).
-;; Tests i32→i64 widening, i64 overflow arithmetic, i64 division, i64→i32 narrowing.
-;; Expected output: 2500000
+;; @test as
+;; @feature cast between numeric types with (as :Type expr)
+;; @expect 2500000
 
 (include io)
 

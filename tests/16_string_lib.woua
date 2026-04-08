@@ -1,7 +1,6 @@
-;; Test: string library
-;; Exercises string=, string-eq, string-copy, string-slice,
-;; string-concat, string-index-of-byte.
-;; Expected output:
+;; @test string-lib
+;; @feature string=, string-eq, string-copy, string-slice, string-concat, string-index-of-byte
+;; @expect
 ;;   eq: 1
 ;;   neq: 0
 ;;   lit-eq: 1
@@ -32,4 +31,4 @@
         (let cat :String (string-concat a c)
           (printf "concat: %s\n" cat))
         ;; string-index-of-byte — 'o' = 111 in "hello" → index 4
-        (printf "index: %d\n" (string-index-of-byte a 111)))))
+        (printf "index: %d\n" (string-index-of-byte a 111))))))

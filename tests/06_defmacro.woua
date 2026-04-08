@@ -1,7 +1,6 @@
-;; Test: defmacro
-;; Declares a macro 'square' that expands (square x) to (* x x).
-;; Verifies macro expansion with a single parameter.
-;; Expected output: 49
+;; @test defmacro
+;; @feature declare and expand a macro with a single parameter
+;; @expect 49
 
 (include io)
 

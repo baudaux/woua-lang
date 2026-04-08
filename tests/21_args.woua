@@ -1,0 +1,18 @@
+;; @test args
+;; @feature read command-line argument count and values via args-count / args-get
+;; @args hello world
+;; @expect
+;;   argc: 3
+;;   argv[0]: 21_args.wasm
+;;   argv[1]: hello
+;;   argv[2]: world
+
+(include io)
+
+(defn main ()
+  (let argc :i32 (args-count)
+    (printf "argc: %d\n" argc)
+    (let i :i32 0
+      (while (< i argc)
+        (printf "argv[%d]: %s\n" i (args-get i))
+        (set! i (+ i 1))))))

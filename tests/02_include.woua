@@ -1,7 +1,6 @@
-;; Test: include
-;; (include io) brings in wasi_p1.woua → core.woua transitively.
-;; Verifies that the include chain resolves library files correctly.
-;; Expected output: include ok
+;; @test include
+;; @feature (include io) resolves the library include chain transitively
+;; @expect include ok
 
 (include io)
 

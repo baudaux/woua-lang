@@ -1,7 +1,6 @@
-;; Test: defn + recursive call
-;; Defines a recursive function computing the nth Fibonacci number.
-;; Verifies that defn supports recursion and local function calls.
-;; Expected output: 55
+;; @test defn
+;; @feature define and call recursive functions
+;; @expect 55
 
 (include io)
 

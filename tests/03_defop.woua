@@ -1,7 +1,6 @@
-;; Test: defop
-;; Declares a new operator 'mod' backed by i32.rem_s (signed remainder).
-;; Verifies that user-defined operators can be added to the operator table.
-;; Expected output: 7
+;; @test defop
+;; @feature declare a new operator backed by a WAT instruction
+;; @expect 7
 
 (include io)
 

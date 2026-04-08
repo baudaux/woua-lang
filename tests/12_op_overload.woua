@@ -1,8 +1,6 @@
-;; Test: op type overloading
-;; The same operator name (+, <) dispatches to different WAT instructions
-;; depending on the types of its arguments (i32 vs i64 vs f32).
-;; Verifies that the overload-resolution in resolveOp works correctly.
-;; Expected output:
+;; @test op-overload
+;; @feature operator dispatch to different WAT instructions based on argument types
+;; @expect
 ;;   i32: 3
 ;;   i64: 5000000000
 ;;   f32: ok

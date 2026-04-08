@@ -1,7 +1,6 @@
-;; Test: if expression
-;; Exercises the three-armed (if cond then else) expression,
-;; and the two-armed (if cond then) form (void else branch).
-;; Expected output:
+;; @test if
+;; @feature two-armed and three-armed if expressions
+;; @expect
 ;;   positive
 ;;   done
 
