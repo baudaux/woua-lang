@@ -27,6 +27,11 @@ jobs:
         working-directory: ./wouac
         run: npm run build
 
+      - name: Install Wasmtime
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+
       - name: Perform tests
         run: ./run_tests.sh
 
