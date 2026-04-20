@@ -29,7 +29,7 @@ jobs:
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
-	with:
-	  name: wouac-wasm
-    	  path: dist/wouac.wasm
+        with:
+          name: wouac-wasm
+          path: wouac/dist/wouac.wasm
 
