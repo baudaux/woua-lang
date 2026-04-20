@@ -17,7 +17,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install dependencies (wouac)
         working-directory: ./wouac
@@ -26,4 +26,10 @@ jobs:
       - name: Build wouac
         working-directory: ./wouac
         run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+	with:
+	  name: wouac-wasm
+    	  path: dist/wouac.wasm
 
