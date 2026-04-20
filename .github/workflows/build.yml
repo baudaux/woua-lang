@@ -32,6 +32,11 @@ jobs:
           curl https://wasmtime.dev/install.sh -sSf | bash
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
 
+      - name: Install WABT (wat2wasm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wabt
+
       - name: Perform tests
         run: ./run_tests.sh
 
