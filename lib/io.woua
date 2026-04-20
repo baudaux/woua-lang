@@ -48,6 +48,17 @@
 (defmacro print (sym)
   (write 1 (static-ptr sym) (static-len sym)))
 
+;; assert: if cond is false (0), write msg to stderr and exit with code 1.
+;; (assert cond "message")
+(defmacro assert (cond msg)
+  (if (not cond)
+    (let __assert_nl :ptr (alloc 1)
+      (i32.store8 __assert_nl 10)
+      (write 2 (static-ptr "assertion failed: ") (static-len "assertion failed: "))
+      (write 2 (static-ptr msg) (static-len msg))
+      (write 2 __assert_nl 1)
+      (proc_exit 1))))
+
 ;; ── printf ───────────────────────────────────────────────────────────────────
 ;; (printf "format" args...)  — compile-time format string expansion.
 ;; The format string must be a string literal. Supported specifiers:

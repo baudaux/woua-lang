@@ -27,6 +27,71 @@ for src in "$TESTS"/*.woua; do
     continue
   fi
 
+  # Check for @expect-map (test verifies the -map flag output)
+  if grep -q '^;; @expect-map' "$src"; then
+    src_rel="tests/$name.woua"
+    wat_rel="tests/out/$name.wat"
+    wasm_file="$OUT/$name.wasm"
+    map_file="$OUT/$name.wat.map"
+    vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel -map"
+    if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" -map 2>/dev/null); then
+      echo "FAIL  $name  (compile error)"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    vcmd "wat2wasm $wat_rel -o $wasm_file"
+    if ! wat2wasm "$OUT/$name.wat" -o "$wasm_file" 2>/dev/null; then
+      echo "FAIL  $name  (wat2wasm error)"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    expected="$(awk '
+      /^;; @expect / { print substr($0, 12); found=1; next }
+      /^;; @expect$/  { found=1; next }
+      found && /^;;   / { print substr($0, 6); next }
+      found { exit }
+    ' "$src")"
+    actual="$(cat "$map_file" 2>/dev/null)"
+    if [ "$actual" = "$expected" ]; then
+      echo "PASS  $name"
+      PASS=$((PASS + 1))
+    else
+      echo "FAIL  $name"
+      echo "  expected: $(echo "$expected" | head -3 | sed 's/^/    /')"
+      echo "  actual:   $(echo "$actual"   | head -3 | sed 's/^/    /')"
+      FAIL=$((FAIL + 1))
+    fi
+    continue
+  fi
+
+  # Check for @expect-wat (test verifies strings present in the WAT output)
+  if grep -q '^;; @expect-wat' "$src"; then
+    src_rel="tests/$name.woua"
+    wat_rel="tests/out/$name.wat"
+    wat_file="$OUT/$name.wat"
+    vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel"
+    if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" 2>/dev/null); then
+      echo "FAIL  $name  (compile error)"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    wat_ok=1
+    while IFS= read -r line; do
+      pattern="${line#;; @expect-wat }"
+      if ! grep -qF "$pattern" "$wat_file"; then
+        echo "FAIL  $name  (WAT missing: $pattern)"
+        wat_ok=0
+      fi
+    done < <(grep '^;; @expect-wat ' "$src")
+    if [ "$wat_ok" -eq 1 ]; then
+      echo "PASS  $name"
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+    fi
+    continue
+  fi
+
   # Check for @expect-error (test expects compilation to fail)
   if grep -q '^;; @expect-error' "$src"; then
     src_rel="tests/$name.woua"
@@ -74,14 +139,38 @@ for src in "$TESTS"/*.woua; do
   # Parse optional @args annotation for passing extra arguments to the wasm
   extra_args="$(awk '/^;; @args / { print substr($0, 10); exit }' "$src")"
 
-  # Run and capture output
+  # Parse optional @expect-exit annotation (expected exit code, default 0)
+  expect_exit="$(awk '/^;; @expect-exit / { print substr($0, 17); exit }' "$src")"
+  expect_exit="${expect_exit:-0}"
+
+  # Run and capture output (stdout normally, stderr when non-zero exit expected)
   if [ -n "$extra_args" ]; then
     vcmd "wasmtime run $wasm_file $extra_args"
     # shellcheck disable=SC2086
-    actual="$(wasmtime run "$wasm_file" $extra_args 2>/dev/null)"
+    set +e
+    if [ "$expect_exit" != "0" ]; then
+      actual="$(wasmtime run "$wasm_file" $extra_args 2>&1 >/dev/null)"
+    else
+      actual="$(wasmtime run "$wasm_file" $extra_args 2>/dev/null)"
+    fi
+    actual_exit=$?
+    set -e
   else
     vcmd "wasmtime $wasm_file"
-    actual="$(wasmtime "$wasm_file" 2>/dev/null)"
+    set +e
+    if [ "$expect_exit" != "0" ]; then
+      actual="$(wasmtime "$wasm_file" 2>&1 >/dev/null)"
+    else
+      actual="$(wasmtime "$wasm_file" 2>/dev/null)"
+    fi
+    actual_exit=$?
+    set -e
+  fi
+
+  if [ "$actual_exit" != "$expect_exit" ]; then
+    echo "FAIL  $name  (expected exit $expect_exit, got $actual_exit)"
+    FAIL=$((FAIL + 1))
+    continue
   fi
 
   if [ "$actual" = "$expected" ]; then

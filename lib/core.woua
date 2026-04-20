@@ -53,14 +53,38 @@
 ;; A float literal: optional minus, digits, a decimal point, and more digits → f32.
 (defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
 
+;; ── Control flow macros ───────────────────────────────────────────────────────
+
+;; (for i from to body...)
+;; Counts i from `from` (inclusive) to `to` (exclusive), step +1.
+;; Expands to: (let i :i32 from (while (< i to) body... (set! i (+ i 1))))
+(defmacro for (i from to ...body)
+  (let i :i32 from
+    (while (< i to)
+      (macro-do body)
+      (set! i (+ i 1)))))
+
 
 (defop + "i32.add"   (:i32 :i32) :i32)
 (defop - "i32.sub"   (:i32 :i32) :i32)
 (defop * "i32.mul"   (:i32 :i32) :i32)
 (defop / "i32.div_s" (:i32 :i32) :i32)
 
+;; ── i32 bitwise ──────────────────────────────────────────────────────────────
+(defop not "i32.eqz"  (:i32)      :i32)
+(defop and "i32.and"  (:i32 :i32) :i32)
+(defop or  "i32.or"   (:i32 :i32) :i32)
+(defop xor "i32.xor"  (:i32 :i32) :i32)
+
+;; ── i64 bitwise ──────────────────────────────────────────────────────────────
+(defop not "i64.eqz"  (:i64)      :i32)
+(defop and "i64.and"  (:i64 :i64) :i64)
+(defop or  "i64.or"   (:i64 :i64) :i64)
+(defop xor "i64.xor"  (:i64 :i64) :i64)
+
 ;; ── i32 comparison ───────────────────────────────────────────────────────────
 (defop =  "i32.eq"   (:i32 :i32) :i32)
+(defop != "i32.ne"   (:i32 :i32) :i32)
 (defop <  "i32.lt_s" (:i32 :i32) :i32)
 (defop >  "i32.gt_s" (:i32 :i32) :i32)
 (defop <= "i32.le_s" (:i32 :i32) :i32)
@@ -74,6 +98,7 @@
 
 ;; ── i64 comparison ───────────────────────────────────────────────────────────
 (defop =  "i64.eq"   (:i64 :i64) :i32)
+(defop != "i64.ne"   (:i64 :i64) :i32)
 (defop <  "i64.lt_s" (:i64 :i64) :i32)
 (defop >  "i64.gt_s" (:i64 :i64) :i32)
 (defop <= "i64.le_s" (:i64 :i64) :i32)
@@ -87,6 +112,7 @@
 
 ;; ── f32 comparison ───────────────────────────────────────────────────────────
 (defop =  "f32.eq" (:f32 :f32) :i32)
+(defop != "f32.ne" (:f32 :f32) :i32)
 (defop <  "f32.lt" (:f32 :f32) :i32)
 (defop >  "f32.gt" (:f32 :f32) :i32)
 (defop <= "f32.le" (:f32 :f32) :i32)
@@ -100,6 +126,7 @@
 
 ;; ── f64 comparison ───────────────────────────────────────────────────────────
 (defop =  "f64.eq" (:f64 :f64) :i32)
+(defop != "f64.ne" (:f64 :f64) :i32)
 (defop <  "f64.lt" (:f64 :f64) :i32)
 (defop >  "f64.gt" (:f64 :f64) :i32)
 (defop <= "f64.le" (:f64 :f64) :i32)
