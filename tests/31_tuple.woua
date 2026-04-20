@@ -1,0 +1,30 @@
+;; @test tuple
+;; @feature functions can return tuples; (let (a b) (f x) ...) destructures them
+;; @expect
+;;   lo=3 hi=4
+;;   lo=5 hi=7
+;;   sum=9 min=1 max=5 count=3
+
+(include io)
+(include core)
+
+;; Returns the smaller and larger of two i32 values.
+(defn minmax (a :i32 b :i32) (:i32 :i32)
+  (if (< a b)
+    (values a b)
+    (values b a)))
+
+;; Returns sum, min, max, count of three i32 values.
+(defn stats3 (a :i32 b :i32 c :i32) (:i32 :i32 :i32 :i32)
+  (let (lo1 hi1) (minmax a b)
+    (let (lo2 hi2) (minmax lo1 c)
+      (let (lo3 hi3) (minmax hi1 c)
+        (values (+ a (+ b c)) lo2 hi3 3)))))
+
+(defn main ()
+  (let (lo :i32 hi :i32) (minmax 4 3)
+    (printf "lo=%d hi=%d\n" lo hi))
+  (let (lo :i32 hi :i32) (minmax 5 7)
+    (printf "lo=%d hi=%d\n" lo hi))
+  (let (s :i32 mn :i32 mx :i32 cnt :i32) (stats3 3 1 5)
+    (printf "sum=%d min=%d max=%d count=%d\n" s mn mx cnt)))

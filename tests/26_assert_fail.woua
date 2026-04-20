@@ -1,0 +1,10 @@
+;; @test assert_fail
+;; @feature assert fires: prints to stderr and exits 1
+;; @expect-exit 1
+;; @expect
+;;   assertion failed: value must be positive
+
+(include io)
+
+(defn main ()
+  (assert 0 "value must be positive"))

@@ -14,7 +14,7 @@ import {
 import { Node, ListNode, SymbolNode, RegexNode,
          TAG_LIST, TAG_SYMBOL, TAG_REGEX } from "./ast";
 import { Reader } from "./reader";
-import { Env, LiteralInfo } from "./env";
+import { Env, StaticInfo, LiteralInfo } from "./env";
 import { expandAll } from "./expander";
 import { generateModule } from "./codegen";
 
@@ -281,6 +281,52 @@ function readAndResolve(
   return result;
 }
 
+// ── Static memory map generation ─────────────────────────────────────────────
+
+function sizeOfStatic(info: StaticInfo): i32 {
+  if (!info.isScalar()) return info.len; // :string or :bytes — len is the actual byte count
+  if (info.typeName == ":i64" || info.typeName == ":f64") return 8;
+  return 4; // :i32, :f32, :ptr
+}
+
+function hexAddr(ptr: i32): string {
+  const digits = "0123456789abcdef";
+  let s = "0x";
+  for (let shift = 12; shift >= 0; shift -= 4) {
+    s += digits.charAt((ptr >> shift) & 0xf);
+  }
+  return s;
+}
+
+// Build a map file: one line per named static, sorted by address.
+// Skips internal interned-string entries (keys starting with "__str:").
+function generateMap(env: Env): string {
+  const keys = env.statics.keys();
+  const sorted = new Array<string>();
+  for (let i = 0; i < keys.length; i++) {
+    if (!keys[i].startsWith("__str:")) sorted.push(keys[i]);
+  }
+  // Insertion sort by address
+  for (let i = 1; i < sorted.length; i++) {
+    const key = sorted[i];
+    const ptr = env.statics.get(key)!.ptr;
+    let j = i - 1;
+    while (j >= 0 && env.statics.get(sorted[j])!.ptr > ptr) {
+      sorted[j + 1] = sorted[j];
+      j--;
+    }
+    sorted[j + 1] = key;
+  }
+  let out = "";
+  for (let i = 0; i < sorted.length; i++) {
+    const key  = sorted[i];
+    const info = env.statics.get(key)!;
+    out += hexAddr(info.ptr) + "  " + sizeOfStatic(info).toString()
+         + "  " + info.typeName + "  " + key + "\n";
+  }
+  return out;
+}
+
 export function _start(): void {
   const args = CommandLine.all;
 
@@ -288,6 +334,7 @@ export function _start(): void {
   let libDir    = "lib/";
   let inputArg  = "";
   let outputArg = "";
+  let emitMap   = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] == "--help" || args[i] == "-h") {
       Console.write(
@@ -299,6 +346,7 @@ export function _start(): void {
         "Options:\n" +
         "  source.woua         Input source file\n" +
         "  -o, --output <file> Output file (default: stdout)\n" +
+        "  -map                Write a <output>.map file with static memory layout\n" +
         "  --lib <dir>         Library directory (default: lib/)\n" +
         "  --help, -h          Show this help message\n" +
         "  --version, -v       Show compiler version\n" +
@@ -325,6 +373,8 @@ export function _start(): void {
     } else if ((args[i] == "-o" || args[i] == "--output") && i + 1 < args.length) {
       outputArg = args[i + 1];
       i++;
+    } else if (args[i] == "-map") {
+      emitMap = true;
     } else if (inputArg == "") {
       inputArg = args[i];
     }
@@ -382,5 +432,20 @@ export function _start(): void {
   } else {
     Console.log(wat);
   }
+
+  // -- Optionally write .map file --------------------------------------------
+  if (emitMap) {
+    if (outputArg == "") {
+      Console.error("wouac: -map requires -o <output>; map file not written\n");
+    } else {
+      const mapPath = outputArg + ".map";
+      if (!writePathString(mapPath, generateMap(env))) {
+        Console.error("wouac: cannot write map file: " + mapPath + "\n");
+        Process.exit(1);
+        return;
+      }
+    }
+  }
+
   Process.exit(0);
 }

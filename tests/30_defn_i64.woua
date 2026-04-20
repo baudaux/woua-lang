@@ -1,0 +1,13 @@
+;; @test defn_i64
+;; @feature define and call recursive functions with i64 parameters and return values
+;; @expect 55
+
+(include io)
+
+(defn fib (n :i64)
+  (if (< n 2i64)
+    n
+    (+ (fib (- n 1i64)) (fib (- n 2i64)))))
+
+(defn main ()
+  (printf "%ld\n" (fib 10i64)))

@@ -1,0 +1,17 @@
+;; @test printf_gen
+;; @feature printf generates one function per unique format string; same string reuses it
+;; @expect
+;;   x=1
+;;   x=2
+;;   x=3
+;;   done
+
+(include io)
+
+;; Three calls: the first two share the same format string (one generated
+;; function reused), the third is a different format (its own function).
+(defn main ()
+  (printf "x=%d\n" 1)
+  (printf "x=%d\n" 2)
+  (printf "x=%d\n" 3)
+  (printf "done\n"))

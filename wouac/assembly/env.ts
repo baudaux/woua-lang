@@ -159,6 +159,12 @@ export class Env {
   dataEntries: Array<string>       = new Array<string>();       // (data ...) directives
   funcBodies:  Map<string, string> = new Map<string, string>(); // name → WAT body
   funcNames:   Array<string>       = new Array<string>();       // insertion order
+  funcResultTypes: Map<string, string> = new Map<string, string>(); // name → inferred result type
+  funcTupleResults: Map<string, Array<string>> = new Map<string, Array<string>>(); // name → tuple types
+
+  // ── printf generated functions: format string → function name ──────────────
+  printfFuncsByFmt:  Map<string, string> = new Map<string, string>();
+  printfNameCounts:  Map<string, i32>    = new Map<string, i32>();    // base name → count
 
   // ── Errors accumulated during compilation ────────────────────────────────
   errors: Array<string> = new Array<string>();

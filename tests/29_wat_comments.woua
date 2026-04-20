@@ -1,0 +1,10 @@
+;; @expect-wat (; defn main ;)
+;; @expect-wat (; greet the user ;)
+;; @expect-wat (; let n ;)
+(include io)
+(include core)
+
+;; greet the user
+(defn main ()
+  (let n 42
+    (printf "n=%d\n" n)))

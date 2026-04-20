@@ -20,7 +20,8 @@
 //   symbol                                local.get
 
 import { Node, ListNode, IntNode, FloatNode, SymbolNode,
-         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_LIST } from "./ast";
+         CommentNode,
+         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_LIST, TAG_COMMENT } from "./ast";
 import { Env, OpInfo } from "./env";
 import { ExpandedForm } from "./expander";
 import { expandFieldGet, expandFieldSet } from "./macros";
@@ -35,9 +36,44 @@ import {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
-  // Codegen all top-level (defn ...) forms, keyed by function name
+  // Pass 1: collect explicit tuple return annotations — these are declared, not
+  // inferred, so they are always available for forward references.
   for (let i = 0; i < forms.length; i++) {
     const node = forms[i].node;
+    if (node.tag != TAG_LIST) continue;
+    const list = node as ListNode;
+    if (list.children.length < 2 || list.children[0].tag != TAG_SYMBOL) continue;
+    if ((list.children[0] as SymbolNode).name != "defn") continue;
+    const fname = (list.children[1] as SymbolNode).name;
+    const tupleTypes = extractTupleAnnotation(list, 3);
+    if (tupleTypes != null) {
+      env.funcTupleResults.set(fname, tupleTypes!);
+      env.funcResultTypes.set(fname, ""); // multi-return: no single result type
+    }
+  }
+
+  // Pass 2: infer result types for single-return functions (skips tuple ones).
+  for (let i = 0; i < forms.length; i++) {
+    const node = forms[i].node;
+    if (node.tag != TAG_LIST) continue;
+    const list = node as ListNode;
+    if (list.children.length < 2 || list.children[0].tag != TAG_SYMBOL) continue;
+    if ((list.children[0] as SymbolNode).name != "defn") continue;
+    const fname = (list.children[1] as SymbolNode).name;
+    if (env.funcTupleResults.has(fname)) continue; // already handled in pass 1
+    const prescanType = inferDefnResultType(list, env);
+    env.funcResultTypes.set(fname, prescanType);
+  }
+
+  // Codegen all top-level (defn ...) forms, keyed by function name.
+  // Top-level CommentNodes are accumulated and prepended to the next defn.
+  let pendingComment = "";
+  for (let i = 0; i < forms.length; i++) {
+    const node = forms[i].node;
+    if (node.tag == TAG_COMMENT) {
+      pendingComment += "  (; " + (node as CommentNode).text + " ;)\n";
+      continue;
+    }
     if (node.tag == TAG_LIST) {
       const list = node as ListNode;
       if (list.children.length > 0 && list.children[0].tag == TAG_SYMBOL) {
@@ -45,11 +81,13 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
         if (head == "defn") {
           const name = (list.children[1] as SymbolNode).name;
           const wat  = codegenDefn(list, env);
-          env.funcBodies.set(name, wat);
+          env.funcBodies.set(name, pendingComment + wat);
           env.funcNames.push(name);
+          pendingComment = "";
         }
       }
     }
+    if (node.tag != TAG_COMMENT) pendingComment = "";
   }
 
   return assembleModule(env);
@@ -220,6 +258,49 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8") return "";
     if (op.includes("/") && op.endsWith("!")) return ""; // struct setter → void
     if (op == "let") {
+      // ── Tuple destructuring ──────────────────────────────────────────────────
+      if (list.children[1].tag == TAG_LIST) {
+        const pattern = list.children[1] as ListNode;
+        let inferredTypes = new Array<string>();
+        if (list.children.length > 2 && list.children[2].tag == TAG_LIST) {
+          const callList = list.children[2] as ListNode;
+          if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
+            const fnName = (callList.children[0] as SymbolNode).name;
+            if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+          }
+        }
+        const pnames = new Array<string>(); const ptypes = new Array<string>();
+        parseTuplePattern(pattern, inferredTypes, pnames, ptypes);
+        const ext = copyLocals(locals);
+        for (let k = 0; k < pnames.length; k++) ext.set(pnames[k], ptypes[k]);
+        if (list.children.length <= 3) return "";
+        return typeOf(list.children[list.children.length - 1], env, ext);
+      }
+      // ── Tuple local: (let name (:t1 :t2) val body...) ────────────────────────
+      {
+        const tlocTypes = extractTupleAnnotation(list, 2);
+        if (tlocTypes != null) {
+          const tname = (list.children[1] as SymbolNode).name;
+          const ext = copyLocals(locals);
+          ext.set(tname, "tuple");
+          for (let k = 0; k < tlocTypes!.length; k++) ext.set(tname + "_" + k.toString(), tlocTypes![k]);
+          if (list.children.length <= 3) return "";
+          return typeOf(list.children[list.children.length - 1], env, ext);
+        }
+      }
+      // ── Inferred tuple local: (let name (tuple-fn args) body...) ───────────
+      if (list.children.length > 2) {
+        const iTypes = inferredTupleTypes(list.children[2], env);
+        if (iTypes != null) {
+          const tname = (list.children[1] as SymbolNode).name;
+          const ext = copyLocals(locals);
+          ext.set(tname, "tuple");
+          for (let k = 0; k < iTypes!.length; k++) ext.set(tname + "_" + k.toString(), iTypes![k]);
+          if (list.children.length <= 3) return "";
+          return typeOf(list.children[list.children.length - 1], env, ext);
+        }
+      }
+      // ── Single binding ────────────────────────────────────────────────────────
       const letName = (list.children[1] as SymbolNode).name;
       let typeAnnot = "";
       let valIdx = 2;
@@ -230,9 +311,13 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
         valIdx = 3;
       }
       if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, locals);
-      const ext = copyLocals(locals);
-      ext.set(letName, typeAnnot);
-      return typeOf(list.children[list.children.length - 1], env, ext);
+      const letExt = copyLocals(locals);
+      letExt.set(letName, typeAnnot);
+      return typeOf(list.children[list.children.length - 1], env, letExt);
+    }
+    if (op == "values") {
+      if (list.children.length < 2) return "";
+      return typeOf(list.children[list.children.length - 1], env, locals);
     }
     if (op == "if" && list.children.length > 2) {
       return typeOf(list.children[2], env, locals);
@@ -246,11 +331,16 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
       const resolved = resolveOp(op, argTypes, env);
       return resolved != null ? resolved.result : ":i32";
     }
-    // struct getter (TypeName/field ptr) → field type
+    // struct getter or tuple-local accessor (TypeName/field ptr) or (name/N) ──
     if (op.includes("/")) {
       const slash = op.indexOf("/");
       const typeName = op.substring(0, slash);
       const field = op.substring(slash + 1);
+      // Tuple-local accessor: (pair/0) — prefix is a "tuple" marker in locals
+      if (locals.has(typeName) && locals.get(typeName)! == "tuple") {
+        const slotKey = typeName + "_" + field;
+        return locals.has(slotKey) ? locals.get(slotKey)! : ":i32";
+      }
       if (env.types.has(typeName)) {
         const typeInfo = env.types.get(typeName)!;
         if (typeInfo.fields.has(field)) return typeInfo.fields.get(field)!.typeName;
@@ -263,15 +353,68 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
   return ":i32";
 }
 
+// Return the tuple type list if children[pos] of `list` is a tuple return
+// annotation — a non-empty ListNode where every element is a ':xxx' symbol.
+// Returns null otherwise.
+function extractTupleAnnotation(list: ListNode, pos: i32): Array<string> | null {
+  if (pos >= list.children.length) return null;
+  const child = list.children[pos];
+  if (child.tag != TAG_LIST) return null;
+  const inner = child as ListNode;
+  if (inner.children.length == 0) return null;
+  for (let k = 0; k < inner.children.length; k++) {
+    if (inner.children[k].tag != TAG_SYMBOL) return null;
+    if (!(inner.children[k] as SymbolNode).name.startsWith(":")) return null;
+  }
+  const types = new Array<string>();
+  for (let k = 0; k < inner.children.length; k++) {
+    types.push((inner.children[k] as SymbolNode).name);
+  }
+  return types;
+}
+
 // Look up the return type of a named function (import or user-defined).
 function funcResultType(name: string, env: Env): string {
   for (let i = 0; i < env.imports.length; i++) {
     if (env.imports[i].localName == name) return env.imports[i].result;
   }
-  return ":i32"; // user-defined functions default to i32
+  if (env.funcResultTypes.has(name)) return env.funcResultTypes.get(name)!;
+  return ":i32"; // fallback
 }
 
 // ─── (defn name (params...) body...) ─────────────────────────────────────────
+
+// Infer the result type of a defn without emitting any WAT.
+// Used by the pre-scan pass so recursive/forward calls resolve correctly.
+// Returns "" for tuple-annotated functions (handled separately).
+function inferDefnResultType(list: ListNode, env: Env): string {
+  const tupleTypes = extractTupleAnnotation(list, 3);
+  if (tupleTypes != null) return ""; // tuple return, handled by pass 1
+  const bodyStart = 3;
+  const params = list.children[2] as ListNode;
+  const paramLocals = new Map<string, string>();
+  for (let i = 0; i < params.children.length; i++) {
+    const pname = (params.children[i] as SymbolNode).name;
+    let ptype = ":i32";
+    if (i + 1 < params.children.length) {
+      const next = params.children[i + 1] as SymbolNode;
+      if (next.name.length > 0 && next.name.charAt(0) == ":") {
+        ptype = next.name;
+        i++;
+      }
+    }
+    paramLocals.set(pname, ptype);
+  }
+  if (list.children.length <= bodyStart) return "";
+  const letLocals = new Map<string, string>();
+  for (let i = bodyStart; i < list.children.length; i++) {
+    collectLetLocals(list.children[i], env, paramLocals, letLocals);
+  }
+  const locals = copyLocals(paramLocals);
+  const letKeys = letLocals.keys();
+  for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k])!);
+  return typeOf(list.children[list.children.length - 1], env, locals);
+}
 
 // Walk an expression tree and collect all (let name :type ...) bindings into
 // the letLocals map.  Params are excluded (they are not let-bindings).
@@ -285,6 +428,59 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
   const op = (head as SymbolNode).name;
 
   if (op == "let") {
+    // ── Tuple destructuring: (let (a [:T] b [:T]...) (tuple-fn ...) body...) ─
+    if (list.children[1].tag == TAG_LIST) {
+      const pattern = list.children[1] as ListNode;
+      let inferredTypes = new Array<string>();
+      if (list.children.length > 2 && list.children[2].tag == TAG_LIST) {
+        const callList = list.children[2] as ListNode;
+        if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
+          const fnName = (callList.children[0] as SymbolNode).name;
+          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+        }
+      }
+      const pnames = new Array<string>(); const ptypes = new Array<string>();
+      parseTuplePattern(pattern, inferredTypes, pnames, ptypes);
+      for (let k = 0; k < pnames.length; k++) {
+        if (!letLocals.has(pnames[k])) letLocals.set(pnames[k], ptypes[k]);
+      }
+      for (let i = 3; i < list.children.length; i++) {
+        collectLetLocals(list.children[i], env, paramLocals, letLocals);
+      }
+      return;
+    }
+    // ── Tuple local: (let name (:t1 :t2...) val body...) ────────────────────
+    {
+      const maybeTypes = extractTupleAnnotation(list, 2);
+      if (maybeTypes != null) {
+        const tname = (list.children[1] as SymbolNode).name;
+        for (let k = 0; k < maybeTypes!.length; k++) {
+          const slot = tname + "_" + k.toString();
+          if (!letLocals.has(slot)) letLocals.set(slot, maybeTypes![k]);
+        }
+        // tname itself is a marker — not a real WAT local; skip adding to letLocals
+        for (let i = 3; i < list.children.length; i++) {
+          collectLetLocals(list.children[i], env, paramLocals, letLocals);
+        }
+        return;
+      }
+    }
+    // ── Inferred tuple local: (let name (tuple-fn args) body...) ───────────
+    if (list.children.length > 2) {
+      const iTypes = inferredTupleTypes(list.children[2], env);
+      if (iTypes != null) {
+        const tname = (list.children[1] as SymbolNode).name;
+        for (let k = 0; k < iTypes!.length; k++) {
+          const slot = tname + "_" + k.toString();
+          if (!letLocals.has(slot)) letLocals.set(slot, iTypes![k]);
+        }
+        for (let i = 3; i < list.children.length; i++) {
+          collectLetLocals(list.children[i], env, paramLocals, letLocals);
+        }
+        return;
+      }
+    }
+    // ── Single binding ────────────────────────────────────────────────────────
     const letName = (list.children[1] as SymbolNode).name;
     let typeAnnot = "";
     let valIdx    = 2;
@@ -293,13 +489,11 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
       typeAnnot = (list.children[2] as SymbolNode).name;
       valIdx    = 3;
     }
-    // Merge param + already-found let locals for type inference on the value
     const allLocals = copyLocals(paramLocals);
     const keys = letLocals.keys();
     for (let k = 0; k < keys.length; k++) allLocals.set(keys[k], letLocals.get(keys[k])!);
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, allLocals);
     if (!letLocals.has(letName)) letLocals.set(letName, typeAnnot);
-    // Recurse into value and body children
     for (let i = valIdx; i < list.children.length; i++) {
       collectLetLocals(list.children[i], env, paramLocals, letLocals);
     }
@@ -313,10 +507,15 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
 }
 
 function codegenDefn(list: ListNode, env: Env): string {
-  // list = (defn  name  (params...)  body...)
-  //          [0]  [1]     [2]         [3..]
+  // list = (defn  name  (params...)  [rettype]  body...)
+  //          [0]  [1]     [2]           [3?]     [3..] or [4..]
+  // rettype is a tuple annotation (:t1 :t2 ...) — a ListNode of type keywords.
   const name   = (list.children[1] as SymbolNode).name;
   const params = list.children[2] as ListNode;
+
+  // Detect optional tuple return annotation at children[3]
+  const tupleTypes = extractTupleAnnotation(list, 3);
+  const bodyStart  = tupleTypes != null ? 4 : 3;
 
   // Build locals map: param name → type.
   // Syntax: (name :Type name :Type ...) — type annotation is optional, defaults to :i32.
@@ -340,7 +539,7 @@ function codegenDefn(list: ListNode, env: Env): string {
   // Collect all let-bindings from the body so we can hoist their (local ...)
   // declarations before any instructions (WAT requires this).
   const letLocals = new Map<string, string>();
-  for (let i = 3; i < list.children.length; i++) {
+  for (let i = bodyStart; i < list.children.length; i++) {
     collectLetLocals(list.children[i], env, paramLocals, letLocals);
   }
 
@@ -355,13 +554,19 @@ function codegenDefn(list: ListNode, env: Env): string {
     paramDecls += " (param $" + paramNames[i] + " " + watType(paramLocals.get(paramNames[i])!) + ")";
   }
 
-  // Determine return type via type inference on the last body expression
-  const resultType = list.children.length > 3
-    ? typeOf(list.children[list.children.length - 1], env, locals)
-    : "";
-  const resultDecl = resultType != ""
-    ? " (result " + watType(resultType) + ")"
-    : "";
+  // Determine return type declaration
+  let resultDecl = "";
+  if (tupleTypes != null) {
+    // Explicit tuple return — emit (result t1 t2 ...)
+    let rparts = "";
+    for (let k = 0; k < tupleTypes!.length; k++) rparts += " " + watType(tupleTypes![k]);
+    resultDecl = " (result" + rparts + ")";
+  } else {
+    const resultType = list.children.length > bodyStart
+      ? typeOf(list.children[list.children.length - 1], env, locals)
+      : "";
+    if (resultType != "") resultDecl = " (result " + watType(resultType) + ")";
+  }
 
   // Hoisted local declarations (all let-bindings at the top of the func body)
   let localDecls = "";
@@ -371,11 +576,11 @@ function codegenDefn(list: ListNode, env: Env): string {
 
   // Codegen body expressions (let will emit only local.set, not local decl)
   let bodyWat = "";
-  for (let i = 3; i < list.children.length; i++) {
+  for (let i = bodyStart; i < list.children.length; i++) {
     bodyWat += "\n    " + codegenExpr(list.children[i], env, locals);
   }
 
-  return "  (func $" + name + paramDecls + resultDecl
+  return "  (; defn " + name + " ;)\n  (func $" + name + paramDecls + resultDecl
        + localDecls
        + bodyWat
        + "\n  )";
@@ -383,7 +588,69 @@ function codegenDefn(list: ListNode, env: Env): string {
 
 // ─── Expression codegen ───────────────────────────────────────────────────────
 
+// If `node` is a call to a tuple-returning function, return its declared types.
+// Returns null for anything else.
+function inferredTupleTypes(node: Node, env: Env): Array<string> | null {
+  if (node.tag != TAG_LIST) return null;
+  const lst = node as ListNode;
+  if (lst.children.length == 0 || lst.children[0].tag != TAG_SYMBOL) return null;
+  const fname = (lst.children[0] as SymbolNode).name;
+  if (!env.funcTupleResults.has(fname)) return null;
+  return env.funcTupleResults.get(fname)!;
+}
+
+// Parse a tuple destructuring pattern `(name [:type] name [:type] ...)` into
+// parallel arrays of names and types.  When no type annotation is present for
+// a slot, falls back to `inferredTypes[slot]` if available, then `:i32`.
+function parseTuplePattern(pattern: ListNode, inferredTypes: Array<string>,
+                           names: Array<string>, types: Array<string>): void {
+  let slot: i32 = 0;
+  let k: i32 = 0;
+  while (k < pattern.children.length) {
+    const child = pattern.children[k];
+    if (child.tag != TAG_SYMBOL) { k++; continue; }
+    const sym = (child as SymbolNode).name;
+    if (sym.startsWith(":")) { k++; continue; } // skip stray type token
+    names.push(sym);
+    k++;
+    // Check for inline type annotation
+    let t = slot < inferredTypes.length ? inferredTypes[slot] : ":i32";
+    if (k < pattern.children.length && pattern.children[k].tag == TAG_SYMBOL &&
+        (pattern.children[k] as SymbolNode).name.startsWith(":")) {
+      t = (pattern.children[k] as SymbolNode).name;
+      k++;
+    }
+    types.push(t);
+    slot++;
+  }
+}
+
+// Compute the WAT (result ...) declaration string for an `if` branch expression.
+// For (values e1..en), returns "t1 t2 ... tn" (space-separated WAT types).
+// For any other expression, returns the single WAT type or "" for void.
+function ifResultDecl(node: Node, env: Env, locals: Map<string, string>): string {
+  if (node.tag == TAG_LIST) {
+    const lst = node as ListNode;
+    if (lst.children.length > 0 && lst.children[0].tag == TAG_SYMBOL &&
+        (lst.children[0] as SymbolNode).name == "values") {
+      let parts = "";
+      for (let i = 1; i < lst.children.length; i++) {
+        if (parts.length > 0) parts += " ";
+        parts += watType(typeOf(lst.children[i], env, locals));
+      }
+      return parts;
+    }
+  }
+  const t = typeOf(node, env, locals);
+  return t != "" ? watType(t) : "";
+}
+
 function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string {
+
+  // Source comment — emit as WAT block comment
+  if (node.tag == TAG_COMMENT) {
+    return "(; " + (node as CommentNode).text + " ;)";
+  }
 
   // Integer literal
   if (node.tag == TAG_INT) {
@@ -500,11 +767,12 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     const elseExpr = list.children.length > 3
       ? codegenExpr(list.children[3], env, locals)
       : "";
-    // Include (result T) when the if produces a value (has an else branch).
-    const ifType = list.children.length > 3
-      ? typeOf(list.children[2], env, locals)
-      : "";
-    const resultWat = ifType != "" ? watType(ifType) : "";
+    // Include (result T...) when the if produces a value (has an else branch).
+    // If the then branch is (values ...), emit a multi-value result declaration.
+    let resultWat = "";
+    if (list.children.length > 3) {
+      resultWat = ifResultDecl(list.children[2], env, locals);
+    }
     return watIf(cond, thenExpr, elseExpr, resultWat);
   }
 
@@ -512,6 +780,77 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   // Type annotation is optional; when absent the type is inferred from the value.
   // The (local ...) declaration is hoisted by codegenDefn — we emit only local.set.
   if (op == "let") {
+    // ── Tuple destructuring: (let (a [:T] b [:T]...) (tuple-fn args...) body...) ─
+    if (list.children[1].tag == TAG_LIST) {
+      const pattern = list.children[1] as ListNode;
+      let inferredTypes = new Array<string>();
+      if (list.children[2].tag == TAG_LIST) {
+        const callList = list.children[2] as ListNode;
+        if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
+          const fnName = (callList.children[0] as SymbolNode).name;
+          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+        }
+      }
+      const pnames = new Array<string>(); const ptypes = new Array<string>();
+      parseTuplePattern(pattern, inferredTypes, pnames, ptypes);
+      const callWat = codegenExpr(list.children[2], env, locals);
+      const newLocals = copyLocals(locals);
+      for (let k = 0; k < pnames.length; k++) newLocals.set(pnames[k], ptypes[k]);
+      // Emit the call, then local.sets in reverse order (stack is LIFO)
+      let nameList = "(";
+      for (let k = 0; k < pnames.length; k++) {
+        if (k > 0) nameList += " ";
+        nameList += pnames[k];
+      }
+      nameList += ")";
+      let body = "(; let " + nameList + " ;) " + callWat;
+      for (let k = pnames.length - 1; k >= 0; k--) {
+        body += "\n    (local.set $" + pnames[k] + ")";
+      }
+      for (let i = 3; i < list.children.length; i++) {
+        body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+      }
+      return body;
+    }
+    // ── Tuple local: (let name (:t1 :t2...) val body...) ────────────────────
+    {
+      const tlocTypes = extractTupleAnnotation(list, 2);
+      if (tlocTypes != null) {
+        const tname = (list.children[1] as SymbolNode).name;
+        const callWat = codegenExpr(list.children[3], env, locals);
+        const newLocals = copyLocals(locals);
+        newLocals.set(tname, "tuple");
+        for (let k = 0; k < tlocTypes!.length; k++) newLocals.set(tname + "_" + k.toString(), tlocTypes![k]);
+        let body = "(; let " + tname + " ;) " + callWat;
+        for (let k = tlocTypes!.length - 1; k >= 0; k--) {
+          body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
+        }
+        for (let i = 4; i < list.children.length; i++) {
+          body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        }
+        return body;
+      }
+    }
+    // ── Inferred tuple local: (let name (tuple-fn args) body...) ────────────
+    {
+      const iTypes = inferredTupleTypes(list.children[2], env);
+      if (iTypes != null) {
+        const tname = (list.children[1] as SymbolNode).name;
+        const callWat = codegenExpr(list.children[2], env, locals);
+        const newLocals = copyLocals(locals);
+        newLocals.set(tname, "tuple");
+        for (let k = 0; k < iTypes!.length; k++) newLocals.set(tname + "_" + k.toString(), iTypes![k]);
+        let body = "(; let " + tname + " ;) " + callWat;
+        for (let k = iTypes!.length - 1; k >= 0; k--) {
+          body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
+        }
+        for (let i = 3; i < list.children.length; i++) {
+          body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        }
+        return body;
+      }
+    }
+    // ── Single binding ────────────────────────────────────────────────────────
     const letName = (list.children[1] as SymbolNode).name;
     let typeAnnot = "";
     let valIdx    = 2;
@@ -522,13 +861,24 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     }
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, locals);
     const val       = codegenExpr(list.children[valIdx], env, locals);
-    const newLocals = copyLocals(locals);
-    newLocals.set(letName, typeAnnot);
-    let body = watLocalSet(letName, val);
+    const newLocalsS = copyLocals(locals);
+    newLocalsS.set(letName, typeAnnot);
+    let bodyS = "(; let " + letName + " ;) " + watLocalSet(letName, val);
     for (let i = valIdx + 1; i < list.children.length; i++) {
-      body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+      bodyS += "\n    " + codegenExpr(list.children[i], env, newLocalsS);
     }
-    return body;
+    return bodyS;
+  }
+
+  // ── (values e1 e2 ... en) — push multiple values onto the stack ───────────
+  // Used as the final expression in tuple-returning functions.
+  if (op == "values") {
+    let out = "";
+    for (let i = 1; i < list.children.length; i++) {
+      if (i > 1) out += "\n    ";
+      out += codegenExpr(list.children[i], env, locals);
+    }
+    return out;
   }
 
   // ── (set! name val) ────────────────────────────────────────────────────────
@@ -565,14 +915,17 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     return watDrop(codegenExpr(list.children[1], env, locals));
   }
 
-  // ── Struct getter: (TypeName/field ptr) ────────────────────────────────────
-  // ── Struct setter: (TypeName/field! ptr val) ───────────────────────────────
+  // ── Struct getter/setter or tuple-local accessor ──────────────────────────
   if (op.includes("/")) {
     const slash    = op.indexOf("/");
     const typeName = op.substring(0, slash);
     const rawField = op.substring(slash + 1);
     const isSetter = rawField.endsWith("!");
     const field    = isSetter ? rawField.substring(0, rawField.length - 1) : rawField;
+    // Tuple-local accessor: (pair/0) — no args, prefix is a tuple marker
+    if (locals.has(typeName) && locals.get(typeName)! == "tuple") {
+      return "(local.get $" + typeName + "_" + field + ")";
+    }
     const ptr      = codegenExpr(list.children[1], env, locals);
     if (isSetter) {
       const val = codegenExpr(list.children[2], env, locals);

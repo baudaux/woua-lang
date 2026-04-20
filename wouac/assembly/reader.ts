@@ -5,7 +5,7 @@
 // patterns registered between calls (via streaming include resolution) are
 // picked up immediately.
 
-import { Node, IntNode, FloatNode, SymbolNode, StringNode, RegexNode, ListNode } from "./ast";
+import { Node, IntNode, FloatNode, SymbolNode, StringNode, RegexNode, ListNode, CommentNode } from "./ast";
 import { Env, LiteralInfo } from "./env";
 
 export class Reader {
@@ -25,9 +25,9 @@ export class Reader {
     this.filename  = filename;
   }
 
-  // True if there are more non-whitespace forms to read.
+  // True if there are more non-whitespace/comment forms to read.
   hasMore(): bool {
-    this.skipWhitespace();
+    this.skipSpaces();
     return this.pos < this.src.length;
   }
 
@@ -39,18 +39,30 @@ export class Reader {
   // Read all top-level forms from the source.
   readAll(): Array<Node> {
     const forms = new Array<Node>();
-    this.skipWhitespace();
+    this.skipSpaces();
     while (this.pos < this.src.length) {
       forms.push(this.readForm());
-      this.skipWhitespace();
+      this.skipSpaces();
     }
     return forms;
   }
 
   // Read one form.
   private readForm(): Node {
-    this.skipWhitespace();
+    this.skipSpaces();
     const c = this.src.charAt(this.pos);
+    if (c == ";") {
+      // Source comment — read to end of line and emit CommentNode
+      this.pos++; // skip first ;
+      if (this.pos < this.src.length && this.src.charAt(this.pos) == ";") this.pos++; // skip second ;
+      if (this.pos < this.src.length && this.src.charAt(this.pos) == " ") this.pos++;  // skip leading space
+      let text = "";
+      while (this.pos < this.src.length && this.src.charAt(this.pos) != "\n") {
+        text += this.src.charAt(this.pos);
+        this.pos++;
+      }
+      return new CommentNode(text);
+    }
     if (c == "(") return this.readList();
     if (c == ")") {
       const col = this.pos - this.lineStart + 1;
@@ -131,10 +143,10 @@ export class Reader {
     const openCol  = this.pos - this.lineStart + 1;
     this.pos++; // consume '('
     const node = new ListNode();
-    this.skipWhitespace();
+    this.skipSpaces();
     while (this.pos < this.src.length && this.src.charAt(this.pos) != ")") {
       node.children.push(this.readForm());
-      this.skipWhitespace();
+      this.skipSpaces();
     }
     if (this.pos >= this.src.length) {
       const loc = this.filename != "" ? this.filename + ":" + openLine.toString() + ":" + openCol.toString() : "line " + openLine.toString() + ":" + openCol.toString();
@@ -221,19 +233,16 @@ export class Reader {
     return new SymbolNode(token);
   }
 
-  // -- Whitespace + line comments --------------------------------------------
+  // -- Whitespace handling ---------------------------------------------------
 
-  private skipWhitespace(): void {
+  // Skip whitespace only (spaces, tabs, newlines) — stops at ';' so comments
+  // are visible to readForm() and can be emitted as CommentNodes.
+  private skipSpaces(): void {
     while (this.pos < this.src.length) {
       const c = this.src.charAt(this.pos);
       if (c == "\n") { this.line++; this.lineStart = this.pos + 1; this.pos++; continue; }
       if (c == " " || c == "\r" || c == "\t") {
         this.pos++;
-      } else if (c == ";") {
-        // line comment -- skip to end of line
-        while (this.pos < this.src.length && this.src.charAt(this.pos) != "\n") {
-          this.pos++;
-        }
       } else {
         break;
       }

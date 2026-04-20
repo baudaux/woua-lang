@@ -1,0 +1,15 @@
+;; @test map
+;; @feature compiler emits a .map file with static memory layout when -map flag is given
+;; @expect-map
+;; @expect
+;;   0x0000  4  :i32  counter
+;;   0x0004  4  :ptr  pool
+;;   0x0008  8  :bytes  scratch
+
+(include core)
+
+(defstatic counter :i32)
+(defstatic pool    :ptr)
+(defstatic scratch :bytes 8)
+
+(defn main ())

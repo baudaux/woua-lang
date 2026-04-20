@@ -1,0 +1,21 @@
+;; @test tuple_local
+;; @feature (let name (fn)) infers tuple local from return type; (name/N) accesses slots
+;; @expect
+;;   lo=3 hi=7
+;;   product=21
+
+(include io)
+(include core)
+
+(defn minmax (a :i32 b :i32) (:i32 :i32)
+  (if (< a b)
+    (values a b)
+    (values b a)))
+
+(defn main ()
+  ;; explicit type annotation
+  (let pair (:i32 :i32) (minmax 7 3)
+    (printf "lo=%d hi=%d\n" (pair/0) (pair/1)))
+  ;; inferred from minmax return type
+  (let pair (minmax 7 3)
+    (printf "product=%d\n" (* (pair/0) (pair/1)))))

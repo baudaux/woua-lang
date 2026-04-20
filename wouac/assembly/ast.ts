@@ -6,6 +6,7 @@ export const TAG_STRING    : i32 = 3;
 export const TAG_LIST      : i32 = 4;
 export const TAG_REGEX     : i32 = 5;
 export const TAG_MACROLIST : i32 = 6; // compile-time list of nodes (variadic macro args)
+export const TAG_COMMENT   : i32 = 7; // source comment forwarded to WAT output
 
 // Base node — all AST nodes carry a tag for dynamic dispatch
 export class Node {
@@ -73,4 +74,10 @@ export class ListNode extends Node {
   symbolAt(i: i32): string {
     return (this.children[i] as SymbolNode).name;
   }
+}
+
+// Source comment — `;;` lines forwarded to WAT as `(; ... ;)` block comments
+export class CommentNode extends Node {
+  text: string;
+  constructor(t: string) { super(TAG_COMMENT); this.text = t; }
 }

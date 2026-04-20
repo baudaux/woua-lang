@@ -1,0 +1,15 @@
+;; @test neq
+;; @feature inequality operator != for i32, i64, f32 and f64
+;; @expect
+;;   1 != 2 = 1
+;;   1 != 1 = 0
+;;   1i64 != 2i64 = 1
+;;   1i64 != 1i64 = 0
+
+(include io)
+
+(defn main ()
+  (printf "1 != 2 = %d\n" (!= 1 2))
+  (printf "1 != 1 = %d\n" (!= 1 1))
+  (printf "1i64 != 2i64 = %d\n" (!= 1i64 2i64))
+  (printf "1i64 != 1i64 = %d\n" (!= 1i64 1i64)))

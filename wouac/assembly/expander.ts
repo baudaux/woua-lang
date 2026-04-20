@@ -5,10 +5,12 @@
 // Other forms are passed through to codegen.
 
 import { Node, ListNode, SymbolNode, IntNode, StringNode, RegexNode,
-         MacroListNode,
-         TAG_INT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST } from "./ast";
+         MacroListNode, CommentNode,
+         TAG_INT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST,
+         TAG_COMMENT } from "./ast";
 import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo } from "./env";
 import { expandDefstatic, expandDeftype, internString } from "./macros";
+import { watData } from "./primitives";
 
 // A form that survives expansion — either a (defn ...) or a top-level expression
 export class ExpandedForm {
@@ -94,6 +96,8 @@ function expandNode(node: Node, env: Env): Node {
   // MacroListNodes are compile-time only; pass through unchanged unless an
   // intrinsic (macro-first / macro-rest / macro-empty?) consumes them.
   if (node.tag == TAG_MACROLIST) return node;
+  // CommentNodes pass through unchanged to codegen.
+  if (node.tag == TAG_COMMENT) return node;
   if (node.tag != TAG_LIST) return node;
   const list = node as ListNode;
   if (list.children.length == 0) return node;
@@ -101,6 +105,14 @@ function expandNode(node: Node, env: Env): Node {
   const head = list.children[0];
   if (head.tag == TAG_SYMBOL) {
     const name = (head as SymbolNode).name;
+
+    // ── (printf "fmt" args...) — compile-time printf function generation ─────
+    // Intercept before user macros so the intrinsic takes priority over the
+    // (defmacro printf ...) definition in io.woua.
+    if (name == "printf") {
+      return expandPrintf(list, env);
+    }
+
     if (env.macros.has(name)) {
       const macro = env.macros.get(name)!;
       const args  = list.tail();
@@ -202,6 +214,20 @@ function expandNode(node: Node, env: Env): Node {
       for (let k = 1; k < list.children.length; k++) seq.children.push(list.children[k]);
       return expandNode(seq, env);
     }
+
+    // ── (macro-do list) — sequence all items of a compile-time MacroListNode ─
+    // Like (macro-seq ...) but takes a single MacroListNode and splices its items.
+    if (name == "macro-do") {
+      const inner = expandNode(list.children[1], env);
+      if (inner.tag != TAG_MACROLIST) return expandNode(inner, env);
+      const items = (inner as MacroListNode).items;
+      if (items.length == 0) return new IntNode(0 as i64);
+      if (items.length == 1) return expandNode(items[0], env);
+      const seq = new ListNode();
+      seq.children.push(new SymbolNode("macro-seq"));
+      for (let k = 0; k < items.length; k++) seq.children.push(items[k]);
+      return expandNode(seq, env);
+    }
   }
 
   // Not a macro call — recursively expand children
@@ -294,6 +320,206 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
     return result;
   }
   return node;
+}
+
+// ── printf compile-time code generation ──────────────────────────────────────
+
+// Parse a printf format string into segments.
+// Returns an array of strings:
+//   "L:<ptr>:<len>"  — literal text, already allocated in static memory
+//   "A:i32"          — %d or %i argument (i32)
+//   "A:i64"          — %ld / %li argument (i64)
+//   "A:str"          — %s argument (String struct pointer, i32)
+//   "A:char"         — %c argument (i32 byte value)
+// Also fills argTypes with the WAT type ("i32" or "i64") per argument.
+// Extract only the argument type sequence from a printf format string, without
+// allocating any static data or touching env. Used for function name generation.
+function printfArgTypes(fmt: string): Array<string> {
+  const types = new Array<string>();
+  let i: i32 = 0;
+  while (i < fmt.length) {
+    if (fmt.charAt(i) == "%" && i + 1 < fmt.length) {
+      i++;
+      const spec = fmt.charAt(i);
+      if (spec == "d" || spec == "i" || spec == "s" || spec == "c") { types.push("i32"); i++; }
+      else if (spec == "l") { types.push("i64"); i += 2; }
+      else i++;
+    } else {
+      i++;
+    }
+  }
+  return types;
+}
+
+function parsePrintfFormat(fmt: string, argTypes: Array<string>, env: Env): Array<string> {
+  const segments = new Array<string>();
+  let litBuf = "";
+
+  let i: i32 = 0;
+  while (i < fmt.length) {
+    const c = fmt.charAt(i);
+    if (c == "%") {
+      i++;
+      if (i >= fmt.length) { litBuf += "%"; break; }
+      const spec = fmt.charAt(i);
+      // Flush accumulated literal chars into a static data segment
+      if (litBuf.length > 0) {
+        const ptr = env.allocate(litBuf.length, 1);
+        env.dataEntries.push(watData(ptr, litBuf));
+        segments.push("L:" + ptr.toString() + ":" + litBuf.length.toString());
+        litBuf = "";
+      }
+      if (spec == "d" || spec == "i") { segments.push("A:i32");  argTypes.push("i32"); i++; }
+      else if (spec == "s")           { segments.push("A:str");  argTypes.push("i32"); i++; }
+      else if (spec == "c")           { segments.push("A:char"); argTypes.push("i32"); i++; }
+      else if (spec == "l")           { i++; i++; segments.push("A:i64"); argTypes.push("i64"); }
+      else if (spec == "%")           { litBuf += "%"; i++; }
+      else                            { litBuf += "%" + spec; i++; }
+    } else {
+      litBuf += c;
+      i++;
+    }
+  }
+  // Flush remaining literal
+  if (litBuf.length > 0) {
+    const ptr = env.allocate(litBuf.length, 1);
+    env.dataEntries.push(watData(ptr, litBuf));
+    segments.push("L:" + ptr.toString() + ":" + litBuf.length.toString());
+  }
+  return segments;
+}
+
+// Build the WAT function body for a printf-generated function.
+function buildPrintfFunc(fmt: string, funcName: string, env: Env): string {
+  const argTypes = new Array<string>();
+  const segments = parsePrintfFormat(fmt, argTypes, env);
+
+  // Function signature — returns i32 so typeOf(call) is :i32 at call sites
+  // Escape double-quotes in the format string for the WAT comment
+  let escFmt = "";
+  for (let i = 0; i < fmt.length; i++) {
+    const ch = fmt.charAt(i);
+    if (ch == "\"") { escFmt += "\\\""; }
+    else if (ch == "\n") { escFmt += "\\n"; }
+    else { escFmt += ch; }
+  }
+  let wat = "  (; printf \"" + escFmt + "\" ;)\n  (func $" + funcName;
+  for (let j = 0; j < argTypes.length; j++) {
+    wat += " (param $a" + j.toString() + " " + argTypes[j] + ")";
+  }
+  wat += " (result i32)\n";
+  if (segments.length > 0) {
+    wat += "    (local $__s i32)\n";
+    wat += "    (local $__iov i32)\n";
+  }
+
+  // Function body
+  let curArg: i32 = 0;
+  for (let j = 0; j < segments.length; j++) {
+    const seg = segments[j];
+    if (seg.startsWith("L:")) {
+      // Literal segment — write static bytes via fd_write
+      const colon1 = seg.indexOf(":", 2) as i32;
+      const ptr    = i32(I64.parseInt(seg.slice(2, colon1)));
+      const len    = i32(I64.parseInt(seg.slice(colon1 + 1)));
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (i32.const " + ptr.toString() + "))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.const " + len.toString() + "))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+    } else if (seg == "A:i32") {
+      // i32 → decimal string via $i32->string
+      wat += "    (local.set $__s (call $i32->string (local.get $a" + curArg.toString() + ")))\n";
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (i32.load (local.get $__s)))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get $__s) (i32.const 4))))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    } else if (seg == "A:i64") {
+      // i64 → decimal string via $i64->string
+      wat += "    (local.set $__s (call $i64->string (local.get $a" + curArg.toString() + ")))\n";
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (i32.load (local.get $__s)))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get $__s) (i32.const 4))))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    } else if (seg == "A:str") {
+      // String struct arg — ptr at offset 0, len at offset 4
+      const an = "$a" + curArg.toString();
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (i32.load (local.get " + an + ")))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get " + an + ") (i32.const 4))))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    } else if (seg == "A:char") {
+      // Single byte arg — store byte then fd_write 1 byte
+      wat += "    (local.set $__s (call $alloc (i32.const 4)))\n";
+      wat += "    (i32.store8 (local.get $__s) (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.const 1))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    }
+  }
+  wat += "    (i32.const 0)\n";
+  wat += "  )\n";
+  return wat;
+}
+
+// Expand a (printf "fmt" args...) call to (call $__printf_N args...).
+// Generates the $__printf_N function on first encounter of each format string.
+function expandPrintf(list: ListNode, env: Env): Node {
+  if (list.children.length < 2) {
+    env.errors.push("printf: expected a format string argument");
+    return new IntNode(0 as i64);
+  }
+  // Extract format string — accept StringNode or pre-interned __str: symbol
+  const fmtArg = list.children[1];
+  let fmtStr = "";
+  if (fmtArg.tag == TAG_STRING) {
+    fmtStr = (fmtArg as StringNode).value;
+  } else if (fmtArg.tag == TAG_SYMBOL) {
+    const sym = (fmtArg as SymbolNode).name;
+    if (sym.startsWith("__str:")) {
+      fmtStr = sym.slice(6);
+    } else {
+      env.errors.push("printf: format must be a string literal (got '" + sym + "')");
+      return new IntNode(0 as i64);
+    }
+  } else {
+    env.errors.push("printf: format must be a compile-time string literal");
+    return new IntNode(0 as i64);
+  }
+
+  // Get or generate the dedicated function for this format string
+  let funcName = "";
+  if (env.printfFuncsByFmt.has(fmtStr)) {
+    funcName = env.printfFuncsByFmt.get(fmtStr)!;
+  } else {
+    // Derive base name from argument types: __printf_i32, __printf_i32_i64, etc.
+    const probeTypes = printfArgTypes(fmtStr);
+    const typeSig = probeTypes.length > 0 ? probeTypes.join("_") : "str";
+    const baseName = "__printf_" + typeSig;
+    // Disambiguate collisions with a suffix counter
+    const count = env.printfNameCounts.has(baseName) ? env.printfNameCounts.get(baseName)! : 0;
+    env.printfNameCounts.set(baseName, count + 1);
+    funcName = count == 0 ? baseName : baseName + "_" + (count + 1).toString();
+    env.printfFuncsByFmt.set(fmtStr, funcName);
+    const body = buildPrintfFunc(fmtStr, funcName, env);
+    env.funcBodies.set(funcName, body);
+    env.funcNames.push(funcName);
+  }
+
+  // Return (drop (funcName arg1 arg2 ...)) — printf is always a statement
+  const callNode = new ListNode();
+  callNode.children.push(new SymbolNode(funcName));
+  for (let i = 2; i < list.children.length; i++) {
+    callNode.children.push(expandNode(list.children[i], env));
+  }
+  const dropNode = new ListNode();
+  dropNode.children.push(new SymbolNode("drop"));
+  dropNode.children.push(callNode);
+  return dropNode;
 }
 
 // ── Main expansion pass ───────────────────────────────────────────────────────

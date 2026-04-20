@@ -1,0 +1,19 @@
+;; @test for
+;; @feature for loop macro counts from start (inclusive) to end (exclusive)
+;; @expect
+;;   0
+;;   1
+;;   2
+;;   3
+;;   4
+;;   sum = 10
+
+(include io)
+
+(defn main ()
+  (for i 0 5
+    (printf "%d\n" i))
+  (let sum :i32 0
+    (for j 1 5
+      (set! sum (+ sum j)))
+    (printf "sum = %d\n" sum)))

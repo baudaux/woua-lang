@@ -1,0 +1,12 @@
+;; @test assert
+;; @feature assert macro prints message to stderr and exits 1 when condition is false
+;; @expect
+;;   before assert
+;;   after assert
+
+(include io)
+
+(defn main ()
+  (printf "before assert\n")
+  (assert 1 "this should not fail")
+  (printf "after assert\n"))
