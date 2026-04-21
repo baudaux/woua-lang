@@ -86,6 +86,17 @@ export class TypeInfo {
   }
 }
 
+// Info stored for each distinct function type used as a first-class value.
+// Represents a function type annotation like (:i32 -> :i32) or (:i32 :i32 -> :i32 :i32).
+export class FuncTypeEntry {
+  params:  Array<string>; // woua type keywords for parameters, e.g. [":i32"]
+  results: Array<string>; // woua type keywords for results — empty for void, multiple for tuples
+  constructor(params: Array<string>, results: Array<string>) {
+    this.params  = params;
+    this.results = results;
+  }
+}
+
 // Info stored for each (defliteral ...) declaration
 export class LiteralInfo {
   name:     string; // e.g. "string"
@@ -165,6 +176,12 @@ export class Env {
   // ── printf generated functions: format string → function name ──────────────
   printfFuncsByFmt:  Map<string, string> = new Map<string, string>();
   printfNameCounts:  Map<string, i32>    = new Map<string, i32>();    // base name → count
+
+  // ── First-class function support (fn-ref / call_indirect) ───────────────────
+  funcTypesByKey:   Map<string, FuncTypeEntry> = new Map<string, FuncTypeEntry>(); // key → type info
+  funcTypeKeys:     Array<string>              = new Array<string>();               // insertion order
+  funcTableEntries: Array<string>              = new Array<string>();               // funcs registered via fn-ref
+  funcTableIndex:   Map<string, i32>           = new Map<string, i32>();            // func name → table index
 
   // ── Errors accumulated during compilation ────────────────────────────────
   errors: Array<string> = new Array<string>();

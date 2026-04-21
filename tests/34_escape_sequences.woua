@@ -1,0 +1,17 @@
+;; @test escape sequences in string literals
+;; @feature \xNN hex byte escape in string literals; basic escapes \n \t \0 already work
+;; @expect
+;;   A
+;;   tab	end
+;;   hex: @
+
+(include io)
+(include core)
+
+(defn main ()
+  ;; \x41 = 'A' (0x41 = 65)
+  (printf "%s\n" (string "\x41"))
+  ;; Mix of \t (tab) and regular chars
+  (printf "tab\tend\n")
+  ;; \x40 = '@'
+  (printf "hex: \x40\n"))

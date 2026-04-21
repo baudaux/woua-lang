@@ -1,0 +1,54 @@
+;; @test first-class functions
+;; @feature (fn-ref name) takes a function's table index; (defn f (cb (:i32 -> :i32) x :i32) (cb x)) calls it via call_indirect; (let fn (:i32 -> :i32) (fn-ref ...) ...) stores a func ref in a local; multi-param and tuple-returning first-class functions
+;; @expect
+;;   10
+;;   11
+;;   12
+;;   20
+;;   15
+;;   3 7
+
+(include io)
+(include core)
+
+;; Simple integer functions used as first-class values.
+(defn double (x :i32) (* x 2))
+(defn add1   (x :i32) (+ x 1))
+
+;; Two-parameter function used as first-class value.
+(defn sum2 (a :i32 b :i32) (+ a b))
+
+;; Takes a function reference and an argument, calls the function.
+(defn apply (f (:i32 -> :i32) x :i32)
+  (f x))
+
+;; Calls the function twice on the same value.
+(defn apply-twice (f (:i32 -> :i32) x :i32)
+  (f (f x)))
+
+;; Takes a two-param function reference and applies it.
+(defn apply2 (f (:i32 :i32 -> :i32) a :i32 b :i32)
+  (f a b))
+
+;; Returns the smaller and larger of two values — used as a tuple-returning first-class fn.
+(defn swap (a :i32 b :i32) (:i32 :i32)
+  (values b a))
+
+;; Takes a two-param, two-result function reference, applies it, forwards the tuple.
+(defn apply-swap (f (:i32 :i32 -> :i32 :i32) a :i32 b :i32) (:i32 :i32)
+  (f a b))
+
+(defn main ()
+  ;; Pass fn-ref directly to higher-order function
+  (printf "%d\n" (apply (fn-ref double) 5))
+  (printf "%d\n" (apply (fn-ref add1) 10))
+  ;; Store fn-ref in a local, then pass it along
+  (let fn (:i32 -> :i32) (fn-ref add1)
+    (printf "%d\n" (apply fn 11)))
+  ;; Apply twice: double(double(5)) = 20
+  (printf "%d\n" (apply-twice (fn-ref double) 5))
+  ;; Multi-param function reference: sum2(7, 8) = 15
+  (printf "%d\n" (apply2 (fn-ref sum2) 7 8))
+  ;; Multi-param tuple-returning function reference: swap(7, 3) = (3, 7)
+  (let (x y) (apply-swap (fn-ref swap) 7 3)
+    (printf "%d %d\n" x y)))

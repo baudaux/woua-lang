@@ -33,6 +33,26 @@
 (defimport fd_tell "wasi_snapshot_preview1" "fd_tell" (:i32 :i32) :i32)
 ;; fd_sync(fd: i32) → errno
 (defimport fd_sync "wasi_snapshot_preview1" "fd_sync" (:i32) :i32)
+;; fd_prestat_get(fd: i32, buf: i32) → errno
+;; buf layout: 8 bytes — [u8 pr_type, u32 pr_name_len] (wasi_prestat_t)
+(defimport fd_prestat_get "wasi_snapshot_preview1" "fd_prestat_get" (:i32 :i32) :i32)
+;; fd_prestat_dir_name(fd: i32, path: i32, path_len: i32) → errno
+(defimport fd_prestat_dir_name "wasi_snapshot_preview1" "fd_prestat_dir_name" (:i32 :i32 :i32) :i32)
+
+;; ── Filesystem ────────────────────────────────────────────────────────────────
+;; path_open(dirfd: i32, dirflags: i32, path: i32, path_len: i32,
+;;           oflags: i32, fs_rights_base: i64, fs_rights_inheriting: i64,
+;;           fdflags: i32, fd_out: i32) → errno
+;; Common oflags: 0=open-existing  1=creat  2=directory  8=trunc
+;; Common rights: 0x40=fd_read  0x80=fd_write
+(defimport path_open "wasi_snapshot_preview1" "path_open" (:i32 :i32 :i32 :i32 :i32 :i64 :i64 :i32 :i32) :i32)
+;; path_create_directory(dirfd: i32, path: i32, path_len: i32) → errno
+(defimport path_create_directory "wasi_snapshot_preview1" "path_create_directory" (:i32 :i32 :i32) :i32)
+;; path_unlink_file(dirfd: i32, path: i32, path_len: i32) → errno
+(defimport path_unlink_file "wasi_snapshot_preview1" "path_unlink_file" (:i32 :i32 :i32) :i32)
+;; path_rename(old_dirfd: i32, old_path: i32, old_path_len: i32,
+;;             new_dirfd: i32, new_path: i32, new_path_len: i32) → errno
+(defimport path_rename "wasi_snapshot_preview1" "path_rename" (:i32 :i32 :i32 :i32 :i32 :i32) :i32)
 
 ;; ── Clock ─────────────────────────────────────────────────────────────────────
 ;; clock_time_get(clock_id: i32, precision: i64, time_ptr: i32) → errno

@@ -122,6 +122,19 @@ export class Reader {
         else if (esc == "\\")   value += "\\";
         else if (esc == delim)  value += delim;
         else if (esc == "0")    value += "\0";
+        else if (esc == "x") {
+          // \xNN — two hex digits (0-9, a-f, A-F)
+          const hexChars = "0123456789abcdefABCDEF";
+          this.pos++;
+          const hi = this.src.charAt(this.pos);
+          this.pos++;
+          const lo = this.src.charAt(this.pos);
+          const hiIdx = hexChars.indexOf(hi);
+          const loIdx = hexChars.indexOf(lo);
+          const hiVal = hiIdx >= 16 ? hiIdx - 6 : hiIdx; // A-F → 10-15
+          const loVal = loIdx >= 16 ? loIdx - 6 : loIdx;
+          value += String.fromCharCode(hiVal * 16 + loVal);
+        }
         else                    value += esc;
         this.pos++;
       } else {

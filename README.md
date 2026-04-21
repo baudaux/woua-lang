@@ -23,14 +23,9 @@ wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua
 wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua -o demos/out/hello_world.wat
 
 # Compile and assemble to WASM
-wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua | wat2wasm - -o demos/out/hello_world.wasm
+wasmtime --dir . wouac/dist/wouac.wasm demos/hello_world.woua -o demos/out/hello_world.wat
+wat2wasm demos/out/hello_world.wat -o demos/out/hello_world.wasm
 wasmtime demos/out/hello_world.wasm
-
-# Use a custom library directory
-wasmtime --dir . --dir /path/to/lib wouac/dist/wouac.wasm --lib /path/to/lib demos/hello_world.woua
-
-# Read from stdin
-cat demos/hello_world.woua | wasmtime --dir . wouac/dist/wouac.wasm
 ```
 
 ### CLI options
@@ -44,6 +39,7 @@ Usage: wouac [options] [source.woua]
 Options:
   source.woua         Input source file
   -o, --output <file> Output file (default: stdout)
+  -map                Also write a <output>.map memory layout file
   --lib <dir>         Library directory (default: lib/)
   --help, -h          Show this help message
   --version, -v       Show compiler version
@@ -52,46 +48,54 @@ Options:
 ## Running the tests
 
 ```sh
-./run_tests.sh          # run all tests
+./run_tests.sh          # run all 36 tests
 ./run_tests.sh 07       # run only test 07
-./run_tests.sh -v       # run all tests with verbose command output
-./run_tests.sh -v 07    # run test 07 with verbose output
+./run_tests.sh -v       # verbose (prints each command)
+./run_tests.sh -v 07    # verbose + filter
 ```
 
-Each test file carries `@test`, `@feature`, and `@expect` (or `@expect-error`) annotations.
-The runner compiles each test with `wouac`, assembles with `wat2wasm`, runs with `wasmtime`,
-and checks the output against `@expect`.
+## Building the demos
+
+```sh
+./build_demos.sh        # compiles all demos/*.woua → demos/out/*.wasm
+```
+
+Demos: `hello_world`, `echo`, `cat`, `bench`.
 
 ## Hello, World
 
 ```woua
-(include std_io)
+(include io)
 
-(defn main ()
-  (print "Hello, World!\n"))
+(defn main () :void
+  (printf "Hello, World!\n"))
 ```
 
-The include chain: `std_io` → `wasi_p1` → `core`.
+The include chain: `io` → `wasi_p1` → `core`.
 
-`core` registers the string literal pattern (`defliteral`), operators (`defop`), and the `String` type.  
-`wasi_p1` imports all WASI Preview 1 functions.  
-`std_io` defines `Iovec`, `write`, and `print`.
+- `core` registers literal patterns, operators, and the `String` type.
+- `wasi_p1` imports all WASI Preview 1 functions.
+- `io` defines the `Iovec` struct, `write`, `printf`, `read-line`, `args-count`, `args-get`, and the filesystem helpers.
 
 ## Project structure
 
 ```
 woua/
   lib/              Standard library (woua source)
-    core.woua         Operators (defop), literal recognition (defliteral),
-                      String type, i32->string, i64->string
-    wasi_p1.woua      All WASI Preview 1 function imports (defimport)
-    std_io.woua       Iovec type, write/print/print-int/print-int64 macros
+    core.woua         Operators, literals, String type, number-to-string
+    wasi_p1.woua      WASI Preview 1 defimports
+    io.woua           I/O: write, printf, read-line, args, file open helpers
+    string.woua       String comparison, copy, slice, concat, search
+    time.woua         Monotonic + wall-clock time via WASI
   demos/
-    hello_world.woua  Example program
+    hello_world.woua  Print "Hello, World!"
+    echo.woua         Echo command-line arguments
+    cat.woua          Open and print a file (uses preopened dirs)
+    bench.woua        Measure a counting loop with time-now-ms
   tests/
-    01_defimport.woua … 15_i32_to_string.woua   One test per language feature
+    01_defimport.woua … 36_return_type_mismatch.woua
     out/              Compiled .wat and .wasm for each test
-  wouac/            Compiler (AssemblyScript, compiles to WASM)
+  wouac/            Compiler (AssemblyScript → WASM)
     assembly/
       index.ts        Entry point, include resolution, CLI
       reader.ts       Tokeniser / parser
@@ -101,6 +105,8 @@ woua/
       ast.ts          AST node types
       macros.ts       Built-in compile-time helpers
       primitives.ts   WAT instruction emitters
+  run_tests.sh      Test runner
+  build_demos.sh    Demo build script
 ```
 
 ## Compiler pipeline
@@ -110,11 +116,9 @@ source.woua
     │
     ▼ readAndResolve          (index.ts)
     │  • reads one form at a time
-    │  • (include name) → recursively reads the file from baseDir or lib/
-    │  • (defliteral …) → registers the literal pattern in env immediately
-    │    so subsequent tokens in the same file are read with the new pattern
+    │  • (include name) → recursively reads from baseDir or lib/
+    │  • (defliteral …) → registers the literal pattern immediately
     │  • string literals with :static flag are interned into linear memory
-    │    as they are encountered
     │
     ▼ expandAll               (expander.ts)
     │  • (defstatic …)  → allocates static data, emits (data …) directive
@@ -130,12 +134,13 @@ source.woua
     ▼ generateModule          (codegen.ts)
     │  • emits (import …) for each env.imports entry
     │  • emits linear memory, static data segments, bump allocator ($alloc)
+    │  • two-pass prescan: collect explicit return types and tuple annotations
     │  • compiles (defn …) bodies with full type inference
-    │  • hoists all (local …) declarations to the top of each function (WAT req.)
-    │  • dead-code elimination: reachability walk from main via (call $name)
+    │  • hoists all (local …) declarations to function top (WAT requirement)
+    │  • dead-code elimination: reachability walk from main
     │  • exports _start → main
     │
-    ▼ WAT output (stdout)
+    ▼ WAT output
 ```
 
 ## Language reference
@@ -144,99 +149,37 @@ source.woua
 ```woua
 ;; This is a line comment
 ```
+Comments inside a `defn` body are forwarded as `(; … ;)` inline WAT comments.
 
 ### Including files
 ```woua
-(include std_io)          ;; searches lib/ then current directory
-(include ../mylib/foo)    ;; relative path, .woua extension added automatically
+(include io)              ;; searches lib/ then current directory
+(include ../mylib/foo)    ;; relative path, .woua added automatically
 ```
-Includes are processed eagerly and deduplicated — the same file is never included twice.
-
-### Declaring external functions (WASI / WASM imports)
-```woua
-(defimport fd_write "wasi_snapshot_preview1" "fd_write" (:i32 :i32 :i32 :i32) :i32)
-;;          ^name   ^wasm module              ^wasm field  ^param types          ^result
-;; Void functions omit the result type:
-(defimport proc_exit "wasi_snapshot_preview1" "proc_exit" (:i32))
-```
-Imported functions appear as `(import …)` at the top of the generated WAT and can be called like any other function. Their return type is tracked by the compiler for correct type inference on call expressions.
-
-### Declaring operators
-Operators map directly to WAT instructions. The same name can be declared for multiple type signatures — the compiler selects the right overload via type inference on the arguments.
-```woua
-(defop + "i32.add"   (:i32 :i32) :i32)
-(defop + "i64.add"   (:i64 :i64) :i64)
-(defop + "f32.add"   (:f32 :f32) :f32)
-(defop < "i32.lt_s"  (:i32 :i32) :i32)
-(defop < "i64.lt_s"  (:i64 :i64) :i32)
-```
-
-### Declaring literal patterns
-The reader has no hardcoded literal syntax. Literal types are declared with a regex pattern:
-```woua
-(defliteral string /"((?:[^"\\]|\\.)*)"/ :string :static)
-;;           ^name  ^regex (JS-style /…/, capture group 1 = value)
-;;                                        ^node type  ^optional :static flag
-(defliteral int64  /-?[0-9]+i64/          :i64)
-(defliteral int    /-?[0-9]+/             :i32)
-(defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
-(defliteral float64 /-?[0-9]*\.[0-9]+f64/ :f64)
-(defliteral hex    /0x[0-9a-fA-F]+/       :i32)
-(defliteral hex64  /0x[0-9a-fA-F]+i64/    :i64)
-```
-Literals with `:static` are interned into linear memory at compile time (string literals). Longer patterns must be declared before shorter ones that match the same prefix (e.g. `int64` before `int`, `hex64` before `hex`).
-
-### Declaring struct types
-```woua
-(deftype Point
-  (x :i32)
-  (y :i32))
-```
-Field types: `:i32` `:i64` `:f32` `:f64` `:ptr`.  
-`(sizeof Point)` resolves to the byte size at compile time.  
-Field accessors are generated automatically:
-```woua
-(Point/x p)        ;; getter → i32.load at p + offset
-(Point/x! p val)   ;; setter → i32.store at p + offset
-```
-
-### Declaring macros
-```woua
-(defmacro square (x)
-  (* x x))
-
-(defmacro print (sym)
-  (write 1 (static-ptr sym) (static-len sym)))
-```
-Macros are expanded recursively at compile time. Parameters are substituted textually. `(static-ptr sym)` and `(static-len sym)` resolve to the compile-time pointer and byte length of any static string (inline literal or named `defstatic`).
-
-### Static data
-```woua
-(defstatic greeting "Hello!")    ;; string in linear memory
-(defstatic counter :i32 0)       ;; 4-byte scalar initialised to 0
-(defstatic buf :bytes 256)       ;; zeroed byte buffer
-```
-Inline string literals do not need `defstatic` — they are auto-interned and deduplicated:
-```woua
-(print "Hello!")   ;; no defstatic needed
-;; Two occurrences of the same literal share the same pointer:
-(= (static-ptr "hello") (static-ptr "hello"))  ;; → 1 (true)
-```
+Includes are processed eagerly and deduplicated.
 
 ### Functions
 ```woua
-;; Parameter types default to :i32 when omitted.
-(defn add (a b)
+;; Inferred return type
+(defn add (a :i32 b :i32)
   (+ a b))
 
-;; Explicit types on any parameter:
-(defn scale (x :i64 factor :i64)
+;; Explicit return type annotation
+(defn scale (x :i64 factor :i64) :i64
   (* x factor))
 
-(defn main ()
-  (print "Hello, World!\n"))
+;; Void function (no result)
+(defn greet (name :String) :void
+  (printf "Hello %s\n" name))
+
+(defn main () :void
+  (printf "result=%d\n" (add 3 4)))
 ```
-Return type is always inferred from the last expression in the body. The function named `main` is exported as `_start`. Dead functions (not reachable from `main`) are eliminated from the output.
+- Parameter types default to `:i32` when omitted.
+- Return type can be declared explicitly after the parameter list with `:ReturnType`.
+- `:void` means the function produces no WAT result.
+- A declared type that mismatches the inferred type is a compile error.
+- `main` is exported as `_start`. Dead functions are eliminated.
 
 ### Expressions
 
@@ -248,29 +191,63 @@ Return type is always inferred from the last expression in the body. The functio
 | `2.718f64` | f64 literal |
 | `0xFF` `0xDEADi64` | hex i32 / i64 literal |
 | `"text"` | string literal (auto-interned into linear memory) |
-| `/pattern/` | regex literal (used in `defliteral`) |
 | `(op a b)` | operator call — overload selected by argument types |
-| `(if cond then)` | conditional, no else branch (void) |
-| `(if cond then else)` | conditional expression — both branches must return the same type |
+| `(if cond then)` | conditional, void (no else) |
+| `(if cond then else)` | conditional expression — both branches must match |
+| `(progn e1 e2 ... en)` | sequence — evaluate in order, return last |
 | `(let name val body...)` | local binding, type inferred from value |
 | `(let name :Type val body...)` | local binding with explicit type |
 | `(set! name val)` | assign to an existing local |
-| `(while cond body...)` | loop — body repeated until cond is false |
-| `(drop expr)` | evaluate and discard a value |
-| `(as :Type expr)` | numeric type cast — emits the appropriate WAT conversion instruction |
+| `(while cond body...)` | loop |
+| `(for i start end body...)` | counted loop — expands to `let` + `while`; `i` increments each iteration |
+| `(drop expr)` | discard a value |
+| `(as :Type expr)` | numeric type cast |
 | `(i32.store ptr val)` | raw 4-byte memory write |
 | `(i32.store8 ptr val)` | raw 1-byte memory write |
-| `(i32.load8_u ptr)` | unsigned 1-byte memory read → i32 |
+| `(i32.load ptr)` | 4-byte memory read → i32 |
+| `(i32.load8_u ptr)` | unsigned 1-byte read → i32 |
+| `(i64.load ptr)` | 8-byte memory read → i64 |
+| `(i64.store ptr val)` | raw 8-byte memory write |
 | `(Type/field ptr)` | struct field getter |
 | `(Type/field! ptr val)` | struct field setter |
 | `(sizeof Type)` | compile-time struct size in bytes |
-| `(static-ptr sym)` | compile-time pointer to a static or inline string |
-| `(static-len sym)` | compile-time byte length of a static or inline string |
-| `(alloc size)` | runtime bump allocator — returns a 4-byte-aligned pointer |
+| `(static-ptr sym)` | compile-time pointer to a static/inline string |
+| `(static-len sym)` | compile-time byte length |
+| `(alloc size)` | runtime bump allocator — returns aligned pointer |
+
+### Tuples (multi-value return)
+
+```woua
+;; Declare a tuple-returning function with a list of result types:
+(defn minmax (a :i32 b :i32) (:i32 :i32)
+  (if (< a b) (values a b) (values b a)))
+
+;; Destructuring bind:
+(let (lo hi) (minmax 7 3)
+  (printf "%d %d\n" lo hi))
+
+;; Named tuple local:
+(let pair (:i32 :i32) (minmax 7 3)
+  (printf "%d %d\n" (pair/0) (pair/1)))
+```
+
+### First-class functions
+
+```woua
+;; Function type syntax: (:arg -> :result)
+(defn apply (f (:i32 -> :i32) x :i32) :i32
+  (f x))
+
+(defn double (x :i32) :i32 (* x 2))
+
+(defn main () :void
+  (printf "%d\n" (apply (fn-ref double) 5)))  ;; 10
+```
+- `(fn-ref name)` returns a WAT table index for the named function.
+- Function-typed locals: `(let fn (:i32 -> :i32) (fn-ref double) ...)`
+- Multi-param and tuple-returning function types are supported.
 
 ### Type casts (`as`)
-
-`(as :TargetType expr)` emits the correct WAT instruction for each conversion:
 
 | From | To | WAT instruction |
 |---|---|---|
@@ -280,7 +257,7 @@ Return type is always inferred from the last expression in the body. The functio
 | `:f64` | `:f32` | `f32.demote_f64` |
 | `:i32` | `:f32` | `f32.convert_i32_s` |
 | `:i32` | `:f64` | `f64.convert_i32_s` |
-| `:ptr` ↔ `:i32` | either | no-op (both are `i32` in WAT) |
+| `:ptr` ↔ `:i32` | either | no-op |
 
 ### Types
 
@@ -291,31 +268,113 @@ Return type is always inferred from the last expression in the body. The functio
 | `:f32` | `f32` | 32-bit float |
 | `:f64` | `f64` | 64-bit float |
 | `:ptr` | `i32` | pointer (alias for `:i32`) |
+| `:void` | — | no result (function return annotation only) |
 | `:TypeName` | `i32` | struct instance (heap pointer) |
+
+### Declaring external functions
+```woua
+(defimport fd_write "wasi_snapshot_preview1" "fd_write" (:i32 :i32 :i32 :i32) :i32)
+(defimport proc_exit "wasi_snapshot_preview1" "proc_exit" (:i32))
+```
+
+### Declaring operators
+```woua
+(defop + "i32.add"  (:i32 :i32) :i32)
+(defop + "i64.add"  (:i64 :i64) :i64)
+(defop < "i32.lt_s" (:i32 :i32) :i32)
+```
+Multiple signatures for the same operator name are resolved by argument types.
+
+### Declaring literal patterns
+```woua
+(defliteral string /"((?:[^"\\]|\\.)*)"/ :string :static)
+(defliteral int64  /-?[0-9]+i64/          :i64)
+(defliteral int    /-?[0-9]+/             :i32)
+(defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
+```
+Longer patterns must be declared before shorter ones that match the same prefix.  
+String literals support `\n \t \r \\ \" \0 \xNN` escape sequences.
+
+### Declaring struct types
+```woua
+(deftype Point (x :i32) (y :i32))
+
+(let p :Point (alloc (sizeof Point))
+  (Point/x! p 10)
+  (Point/y! p 20)
+  (printf "%d\n" (Point/x p)))
+```
+
+### Declaring macros
+```woua
+(defmacro square (x) (* x x))
+```
+Macros expand recursively at compile time. `(static-ptr sym)` and `(static-len sym)` resolve inline string literals to compile-time constants.
+
+### Static data
+```woua
+(defstatic greeting "Hello!")
+(defstatic counter :i32 0)
+(defstatic buf :bytes 256)
+```
+Inline string literals are auto-interned and deduplicated — no `defstatic` needed.
 
 ## Standard library
 
 ### `lib/core.woua`
-Defines all literal patterns, arithmetic and comparison operators for i32/i64/f32/f64, the `String` type, and number-to-string conversion:
+Literal patterns, arithmetic/comparison/bitwise operators for i32/i64/f32/f64, the `String` type, and number-to-string conversion.
+
+| Function | Signature | Description |
+|---|---|---|
+| `i32->string` | `(n :i32) → :String` | Convert i32 to decimal string |
+| `i64->string` | `(n :i64) → :String` | Convert i64 to decimal string |
+| `string` | `(s) → :String` | Wrap a string literal as a runtime `String` struct |
+
+### `lib/wasi_p1.woua`
+`defimport` declarations for the WASI Preview 1 functions currently supported:
+`proc_exit`, `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get`,
+`fd_read`, `fd_write`, `fd_close`, `fd_seek`, `fd_tell`, `fd_sync`,
+`fd_prestat_get`, `fd_prestat_dir_name`,
+`path_open`, `path_create_directory`, `path_unlink_file`, `path_rename`,
+`clock_time_get`, `clock_res_get`, `random_get`.
+
+### `lib/io.woua`
+I/O helpers (includes `wasi_p1`):
 
 | Function / Macro | Signature | Description |
 |---|---|---|
-| `i32->string` | `(n) → :String` | Convert i32 to a heap-allocated String |
-| `i64->string` | `(n :i64) → :String` | Convert i64 to a heap-allocated String |
-| `string` | `(s) → :String` | Wrap an inline string literal as a runtime String struct |
+| `write` | `(fd ptr len)` | Write raw bytes to a fd |
+| `printf` | `(fmt args...)` | Formatted print to stdout (`%d %s %f %x`) |
+| `assert` | `(cond "msg")` | Print message and exit 1 if false |
+| `read-line` | `(fd buf maxlen) → :i32` | Read one line; returns byte count |
+| `args-count` | `() → :i32` | Number of CLI arguments |
+| `args-get` | `(i :i32) → :String` | i-th CLI argument as a `String` |
+| `find-preopen` | `(name :String buf :ptr buf-len :i32) → :i32` | Scan WASI preopens for a matching dir name; returns fd or -1 |
+| `open-file-at` | `(dirfd :i32 path :String readonly :i32) → :i32` | Open a file relative to a preopened fd |
+| `open-file` | `(dir :String path :String readonly :i32) → :i32` | Find preopen + open file in one call |
 
-### `lib/wasi_p1.woua`
-Imports the full WASI Preview 1 surface: `proc_exit`, `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get`, `fd_read`, `fd_write`, `fd_close`, `fd_seek`, `fd_tell`, `fd_sync`, `clock_time_get`, `clock_res_get`, `random_get`.
+### `lib/string.woua`
+String utilities (includes `core`):
 
-### `lib/std_io.woua`
-Defines the `Iovec` struct and I/O macros (includes `wasi_p1`):
-
-| Macro | Signature | Description |
+| Function / Macro | Signature | Description |
 |---|---|---|
-| `write` | `(fd ptr len)` | Write raw bytes to a file descriptor |
-| `write-string` | `(fd s)` | Write a runtime `String` struct to a fd |
-| `print-string` | `(s)` | Print a runtime `String` struct to stdout |
-| `print-int` | `(n)` | Print an i32 to stdout |
-| `print-int64` | `(n)` | Print an i64 to stdout |
-| `print` | `(sym)` | Print a static/inline string literal to stdout |
+| `string-len` | `(s :String) → :i32` | Byte length |
+| `string-ptr` | `(s :String) → :ptr` | Raw data pointer |
+| `string=` | `(a :String b :String) → :i32` | Content equality |
+| `string-eq` | `(s :String "literal") → :i32` | Compare with a compile-time literal |
+| `string-copy` | `(s :String) → :String` | Deep copy |
+| `string-slice` | `(s :String offset len) → :String` | Slice (no copy) |
+| `string-concat` | `(a :String b :String) → :String` | Concatenate |
+| `string-index-of-byte` | `(s :String b :i32) → :i32` | First index of byte, or -1 |
+
+### `lib/time.woua`
+Time helpers built on `clock_time_get` (includes `wasi_p1`):
+
+| Function | Signature | Description |
+|---|---|---|
+| `time-now-ns` | `() → :i64` | Monotonic time in nanoseconds |
+| `time-realtime-ns` | `() → :i64` | Wall-clock nanoseconds since Unix epoch |
+| `time-now-ms` | `() → :i64` | Monotonic time in milliseconds |
+| `time-elapsed-ms` | `(start :i64) → :i64` | Milliseconds since `start` |
+
 

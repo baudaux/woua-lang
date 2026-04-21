@@ -1,0 +1,38 @@
+;; lib/time.woua — time helpers built on WASI clock_time_get / clock_res_get.
+;;
+;; Clock IDs (WASI Preview 1):
+;;   0 = CLOCK_REALTIME    — wall-clock time since Unix epoch
+;;   1 = CLOCK_MONOTONIC   — monotonic timer, suitable for measuring intervals
+;;
+;; All functions return i64 nanosecond values.
+;; On error (clock unavailable) the raw value -1i64 is returned.
+
+(include wasi_p1)
+
+;; (time-now-ns) → i64
+;; Returns the current monotonic time in nanoseconds.
+(defn time-now-ns () :i64
+  (let buf :ptr (alloc 8)
+    (let err :i32 (clock_time_get 1 1i64 buf)
+      (if (= err 0)
+        (i64.load buf)
+        -1i64))))
+
+;; (time-realtime-ns) → i64
+;; Returns the current wall-clock time in nanoseconds since the Unix epoch.
+(defn time-realtime-ns () :i64
+  (let buf :ptr (alloc 8)
+    (let err :i32 (clock_time_get 0 1i64 buf)
+      (if (= err 0)
+        (i64.load buf)
+        -1i64))))
+
+;; (time-now-ms) → i64
+;; Returns the current monotonic time in milliseconds.
+(defn time-now-ms () :i64
+  (/ (time-now-ns) 1000000i64))
+
+;; (time-elapsed-ms start) → i64
+;; Returns the number of milliseconds elapsed since `start` (a value from time-now-ms).
+(defn time-elapsed-ms (start :i64) :i64
+  (- (time-now-ms) start))

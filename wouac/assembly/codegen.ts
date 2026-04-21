@@ -22,13 +22,14 @@
 import { Node, ListNode, IntNode, FloatNode, SymbolNode,
          CommentNode,
          TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_LIST, TAG_COMMENT } from "./ast";
-import { Env, OpInfo } from "./env";
+import { Env, OpInfo, FuncTypeEntry } from "./env";
 import { ExpandedForm } from "./expander";
 import { expandFieldGet, expandFieldSet } from "./macros";
 import {
   watI32Const, watF32Const, watF64Const, watI64Const,
   watLocalGet, watLocalSet, watLocalDecl,
   watI32Store, watI32Store8, watI32Load, watI32Load8u,
+  watI64Store, watI64Load,
   watIf, watBlock, watLoop, watBrIf, watBr,
   watCall, watDrop, watReturn,
 } from "./primitives";
@@ -103,14 +104,95 @@ function watType(t: string): string {
   if (t == ":i64")                 return "i64";
   if (t == ":f32")                 return "f32";
   if (t == ":f64")                 return "f64";
+  if (t.startsWith(":func:"))      return "i32"; // function reference = table index
   // User-defined type name — struct instances are always heap pointers (i32)
   return "i32";
+}
+
+// ─── First-class function helpers ────────────────────────────────────────────────────────────
+
+// True if `node` is a function-type annotation: a ListNode containing a `->` symbol.
+function isFuncTypeNode(node: Node): bool {
+  if (node.tag != TAG_LIST) return false;
+  const list = node as ListNode;
+  for (let i = 0; i < list.children.length; i++) {
+    if (list.children[i].tag == TAG_SYMBOL &&
+        (list.children[i] as SymbolNode).name == "->") return true;
+  }
+  return false;
+}
+
+// Parse a function-type node (:T1 :T2 -> :TR) into a FuncTypeEntry.
+// The `->` symbol separates parameter types from the result type.
+function parseFuncTypeNode(node: ListNode): FuncTypeEntry {
+  const params  = new Array<string>();
+  const results = new Array<string>();
+  let afterArrow = false;
+  for (let i = 0; i < node.children.length; i++) {
+    const child = node.children[i];
+    if (child.tag != TAG_SYMBOL) continue;
+    const sym = (child as SymbolNode).name;
+    if (sym == "->") { afterArrow = true; continue; }
+    if (afterArrow) results.push(sym);
+    else params.push(sym);
+  }
+  return new FuncTypeEntry(params, results);
+}
+
+// Produce the canonical WAT type key for a function signature.
+// Example: params=[":i32",":i32"] results=[":i32",":i32"] → "fn_i32_i32_to_i32_i32"
+function funcTypeKey(params: Array<string>, results: Array<string>): string {
+  let key = "fn";
+  for (let i = 0; i < params.length; i++) key += "_" + params[i].slice(1);
+  key += "_to";
+  if (results.length == 0) key += "_void";
+  else for (let i = 0; i < results.length; i++) key += "_" + results[i].slice(1);
+  return key;
+}
+
+// Register a function type in env (if new) and return its key.
+function registerFuncTypeIfNeeded(params: Array<string>, results: Array<string>, env: Env): string {
+  const key = funcTypeKey(params, results);
+  if (!env.funcTypesByKey.has(key)) {
+    env.funcTypesByKey.set(key, new FuncTypeEntry(params, results));
+    env.funcTypeKeys.push(key);
+  }
+  return key;
+}
+
+// Add a named function to the first-class function table; return its table index.
+function registerFuncRef(name: string, env: Env): i32 {
+  if (env.funcTableIndex.has(name)) return env.funcTableIndex.get(name)!;
+  const idx = env.funcTableEntries.length;
+  env.funcTableEntries.push(name);
+  env.funcTableIndex.set(name, idx);
+  return idx;
 }
 
 // ─── Module assembly ──────────────────────────────────────────────────────────
 
 function assembleModule(env: Env): string {
   let out = "(module\n";
+
+  // Function type declarations for call_indirect (first-class functions)
+  for (let i = 0; i < env.funcTypeKeys.length; i++) {
+    const key = env.funcTypeKeys[i];
+    const ft  = env.funcTypesByKey.get(key)!;
+    let typeDecl = "  (type $" + key + " (func";
+    if (ft.params.length > 0) {
+      typeDecl += " (param";
+      for (let j = 0; j < ft.params.length; j++) typeDecl += " " + watType(ft.params[j]);
+      typeDecl += ")";
+    }
+    if (ft.results.length > 0) {
+      typeDecl += " (result";
+      for (let j = 0; j < ft.results.length; j++) typeDecl += " " + watType(ft.results[j]);
+      typeDecl += ")";
+    }
+    typeDecl += "))\n";
+    out += typeDecl;
+  }
+  if (env.funcTypeKeys.length > 0) out += "\n";
 
   // Imports from (defimport ...) declarations
   for (let i = 0; i < env.imports.length; i++) {
@@ -134,6 +216,16 @@ function assembleModule(env: Env): string {
   // Linear memory
   out += "  (memory 1)\n";
   out += '  (export "memory" (memory 0))\n\n';
+
+  // Function table for first-class functions (fn-ref / call_indirect)
+  if (env.funcTableEntries.length > 0) {
+    out += "  (table " + env.funcTableEntries.length.toString() + " funcref)\n";
+    out += "  (elem (i32.const 0)";
+    for (let i = 0; i < env.funcTableEntries.length; i++) {
+      out += " $" + env.funcTableEntries[i];
+    }
+    out += ")\n\n";
+  }
 
   // Data sections from defstatic
   for (let i = 0; i < env.dataEntries.length; i++) {
@@ -160,6 +252,10 @@ function assembleModule(env: Env): string {
   const reachable = new Set<string>();
   const queue     = new Array<string>();
   queue.push("main");
+  // Functions registered via fn-ref are reachable (called indirectly via the table)
+  for (let i = 0; i < env.funcTableEntries.length; i++) {
+    queue.push(env.funcTableEntries[i]);
+  }
   while (queue.length > 0) {
     const fname = queue.shift();
     if (reachable.has(fname)) continue;
@@ -209,6 +305,7 @@ function normalizeType(t: string): string {
   if (t == ":i64")                 return ":i64";
   if (t == ":f32")                 return ":f32";
   if (t == ":f64")                 return ":f64";
+  if (t.startsWith(":func:"))      return ":i32"; // function reference is i32
   return ":i32"; // user-defined struct type (pointer)
 }
 
@@ -319,10 +416,21 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
       if (list.children.length < 2) return "";
       return typeOf(list.children[list.children.length - 1], env, locals);
     }
+    if (op == "progn") {
+      if (list.children.length < 2) return "";
+      return typeOf(list.children[list.children.length - 1], env, locals);
+    }
     if (op == "if" && list.children.length > 2) {
-      return typeOf(list.children[2], env, locals);
+      // Skip any comment nodes to reach the real then-branch.
+      let thenIdx = 2;
+      while (thenIdx < list.children.length && list.children[thenIdx].tag == TAG_COMMENT) thenIdx++;
+      if (thenIdx < list.children.length) return typeOf(list.children[thenIdx], env, locals);
+      return "";
     }
     if (op == "while") return ""; // while is always void
+    if (op == "fn-ref") return ":i32"; // table index is i32
+    if (op == "i64.load") return ":i64";
+    if (op == "i64.store") return "";  // void
     if (env.ops.has(op)) {
       const argTypes = new Array<string>();
       for (let i = 1; i < list.children.length; i++) {
@@ -344,6 +452,15 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
       if (env.types.has(typeName)) {
         const typeInfo = env.types.get(typeName)!;
         if (typeInfo.fields.has(field)) return typeInfo.fields.get(field)!.typeName;
+      }
+      return ":i32";
+    }
+    // First-class function call via a function-typed local (call_indirect)
+    if (locals.has(op) && locals.get(op)!.startsWith(":func:")) {
+      const typeKey = locals.get(op)!.slice(6);
+      if (env.funcTypesByKey.has(typeKey)) {
+        const ftRes = env.funcTypesByKey.get(typeKey)!.results;
+        return ftRes.length == 1 ? ftRes[0] : "";
       }
       return ":i32";
     }
@@ -373,6 +490,18 @@ function extractTupleAnnotation(list: ListNode, pos: i32): Array<string> | null 
   return types;
 }
 
+// Returns the explicit scalar return type annotation at children[3] of a defn
+// list (e.g. ":i32", ":void", ":f32"), or null if not present.
+// Mutually exclusive with extractTupleAnnotation — call that first.
+function extractScalarReturnAnnotation(list: ListNode): string | null {
+  if (list.children.length <= 3) return null;
+  const child = list.children[3];
+  if (child.tag != TAG_SYMBOL) return null;
+  const sym = (child as SymbolNode).name;
+  if (!sym.startsWith(":")) return null;
+  return sym;
+}
+
 // Look up the return type of a named function (import or user-defined).
 function funcResultType(name: string, env: Env): string {
   for (let i = 0; i < env.imports.length; i++) {
@@ -390,6 +519,13 @@ function funcResultType(name: string, env: Env): string {
 function inferDefnResultType(list: ListNode, env: Env): string {
   const tupleTypes = extractTupleAnnotation(list, 3);
   if (tupleTypes != null) return ""; // tuple return, handled by pass 1
+
+  // Explicit scalar return annotation overrides inference.
+  const scalarAnnot = extractScalarReturnAnnotation(list);
+  if (scalarAnnot != null) {
+    return scalarAnnot == ":void" ? "" : scalarAnnot;
+  }
+
   const bodyStart = 3;
   const params = list.children[2] as ListNode;
   const paramLocals = new Map<string, string>();
@@ -397,9 +533,13 @@ function inferDefnResultType(list: ListNode, env: Env): string {
     const pname = (params.children[i] as SymbolNode).name;
     let ptype = ":i32";
     if (i + 1 < params.children.length) {
-      const next = params.children[i + 1] as SymbolNode;
-      if (next.name.length > 0 && next.name.charAt(0) == ":") {
-        ptype = next.name;
+      const next = params.children[i + 1];
+      if (next.tag == TAG_SYMBOL && (next as SymbolNode).name.startsWith(":")) {
+        ptype = (next as SymbolNode).name;
+        i++;
+      } else if (isFuncTypeNode(next)) {
+        const ft = parseFuncTypeNode(next as ListNode);
+        ptype = ":func:" + registerFuncTypeIfNeeded(ft.params, ft.results, env);
         i++;
       }
     }
@@ -480,6 +620,17 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
         return;
       }
     }
+    // ── Function-typed local: (let name (:P -> :R) val body...) ─────────────
+    if (list.children.length > 3 && isFuncTypeNode(list.children[2])) {
+      const ft = parseFuncTypeNode(list.children[2] as ListNode);
+      const typeKey = registerFuncTypeIfNeeded(ft.params, ft.results, env);
+      const letName = (list.children[1] as SymbolNode).name;
+      if (!letLocals.has(letName)) letLocals.set(letName, ":func:" + typeKey);
+      for (let i = 3; i < list.children.length; i++) {
+        collectLetLocals(list.children[i], env, paramLocals, letLocals);
+      }
+      return;
+    }
     // ── Single binding ────────────────────────────────────────────────────────
     const letName = (list.children[1] as SymbolNode).name;
     let typeAnnot = "";
@@ -513,9 +664,10 @@ function codegenDefn(list: ListNode, env: Env): string {
   const name   = (list.children[1] as SymbolNode).name;
   const params = list.children[2] as ListNode;
 
-  // Detect optional tuple return annotation at children[3]
+  // Detect optional tuple or scalar return annotation at children[3]
   const tupleTypes = extractTupleAnnotation(list, 3);
-  const bodyStart  = tupleTypes != null ? 4 : 3;
+  const scalarAnnot = tupleTypes == null ? extractScalarReturnAnnotation(list) : null;
+  const bodyStart  = (tupleTypes != null || scalarAnnot != null) ? 4 : 3;
 
   // Build locals map: param name → type.
   // Syntax: (name :Type name :Type ...) — type annotation is optional, defaults to :i32.
@@ -525,12 +677,17 @@ function codegenDefn(list: ListNode, env: Env): string {
     const pname = (params.children[i] as SymbolNode).name;
     paramNames.push(pname);
     // Peek at next child: if it starts with ':', it's a type annotation.
+    // If it's a function type like (:i32 -> :i32), treat it as a func-ref param.
     let ptype = ":i32";
     if (i + 1 < params.children.length) {
-      const next = params.children[i + 1] as SymbolNode;
-      if (next.name.length > 0 && next.name.charAt(0) == ":") {
-        ptype = next.name;
+      const next = params.children[i + 1];
+      if (next.tag == TAG_SYMBOL && (next as SymbolNode).name.startsWith(":")) {
+        ptype = (next as SymbolNode).name;
         i++; // consume the type token
+      } else if (isFuncTypeNode(next)) {
+        const ft = parseFuncTypeNode(next as ListNode);
+        ptype = ":func:" + registerFuncTypeIfNeeded(ft.params, ft.results, env);
+        i++; // consume the type annotation
       }
     }
     paramLocals.set(pname, ptype);
@@ -561,6 +718,19 @@ function codegenDefn(list: ListNode, env: Env): string {
     let rparts = "";
     for (let k = 0; k < tupleTypes!.length; k++) rparts += " " + watType(tupleTypes![k]);
     resultDecl = " (result" + rparts + ")";
+  } else if (scalarAnnot != null) {
+    if (scalarAnnot != ":void") {
+      resultDecl = " (result " + watType(scalarAnnot) + ")";
+      // Mismatch check: warn when both declared and inferred are non-empty and differ.
+      const inferred = list.children.length > bodyStart
+        ? typeOf(list.children[list.children.length - 1], env, locals)
+        : "";
+      if (inferred != "" && inferred != scalarAnnot) {
+        env.errors.push("defn " + name + ": declared return type " + scalarAnnot
+          + " but body returns " + inferred);
+      }
+    }
+    // :void → resultDecl stays ""
   } else {
     const resultType = list.children.length > bodyStart
       ? typeOf(list.children[list.children.length - 1], env, locals)
@@ -762,16 +932,21 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
 
   // ── (if cond then else?) ───────────────────────────────────────────────────
   if (op == "if") {
-    const cond     = codegenExpr(list.children[1], env, locals);
-    const thenExpr = codegenExpr(list.children[2], env, locals);
-    const elseExpr = list.children.length > 3
-      ? codegenExpr(list.children[3], env, locals)
-      : "";
+    const cond = codegenExpr(list.children[1], env, locals);
+    // Skip any interleaved comment nodes to find the real then/else branches.
+    let thenIdx = 2;
+    while (thenIdx < list.children.length && list.children[thenIdx].tag == TAG_COMMENT) thenIdx++;
+    let elseIdx = thenIdx + 1;
+    while (elseIdx < list.children.length && list.children[elseIdx].tag == TAG_COMMENT) elseIdx++;
+    const thenExpr = thenIdx < list.children.length
+      ? codegenExpr(list.children[thenIdx], env, locals) : "";
+    const elseExpr = elseIdx < list.children.length
+      ? codegenExpr(list.children[elseIdx], env, locals) : "";
     // Include (result T...) when the if produces a value (has an else branch).
     // If the then branch is (values ...), emit a multi-value result declaration.
     let resultWat = "";
-    if (list.children.length > 3) {
-      resultWat = ifResultDecl(list.children[2], env, locals);
+    if (elseIdx < list.children.length) {
+      resultWat = ifResultDecl(list.children[thenIdx], env, locals);
     }
     return watIf(cond, thenExpr, elseExpr, resultWat);
   }
@@ -850,6 +1025,20 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         return body;
       }
     }
+    // ── Function-typed local: (let name (:P -> :R) val body...) ─────────────
+    if (list.children.length > 3 && isFuncTypeNode(list.children[2])) {
+      const ft = parseFuncTypeNode(list.children[2] as ListNode);
+      const typeKey = registerFuncTypeIfNeeded(ft.params, ft.results, env);
+      const letName2 = (list.children[1] as SymbolNode).name;
+      const val2 = codegenExpr(list.children[3], env, locals);
+      const newLocals2 = copyLocals(locals);
+      newLocals2.set(letName2, ":func:" + typeKey);
+      let body2 = "(; let " + letName2 + " ;) " + watLocalSet(letName2, val2);
+      for (let i = 4; i < list.children.length; i++) {
+        body2 += "\n    " + codegenExpr(list.children[i], env, newLocals2);
+      }
+      return body2;
+    }
     // ── Single binding ────────────────────────────────────────────────────────
     const letName = (list.children[1] as SymbolNode).name;
     let typeAnnot = "";
@@ -868,6 +1057,16 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       bodyS += "\n    " + codegenExpr(list.children[i], env, newLocalsS);
     }
     return bodyS;
+  }
+
+  // ── (progn e1 e2 ... en) — evaluate in order, return last ─────────────────
+  if (op == "progn") {
+    let out = "";
+    for (let i = 1; i < list.children.length; i++) {
+      if (i > 1) out += "\n    ";
+      out += codegenExpr(list.children[i], env, locals);
+    }
+    return out;
   }
 
   // ── (values e1 e2 ... en) — push multiple values onto the stack ───────────
@@ -910,6 +1109,15 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   if (op == "i32.load8_u") {
     return watI32Load8u(codegenExpr(list.children[1], env, locals));
   }
+  // ── (i64.load ptr) — 8-byte read → i64 ─────────────────────────
+  if (op == "i64.load") {
+    return watI64Load(codegenExpr(list.children[1], env, locals));
+  }
+  // ── (i64.store ptr val) — 8-byte write ──────────────────────────
+  if (op == "i64.store") {
+    return watI64Store(codegenExpr(list.children[1], env, locals),
+                      codegenExpr(list.children[2], env, locals));
+  }
   // ── (drop expr) — discard a value (void) ──────────────────────────────────
   if (op == "drop") {
     return watDrop(codegenExpr(list.children[1], env, locals));
@@ -932,6 +1140,23 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return expandFieldSet(typeName, field, ptr, val, env);
     }
     return expandFieldGet(typeName, field, ptr, env);
+  }
+
+  // ── (fn-ref name) — produce the call-table index of a named function ─────
+  if (op == "fn-ref") {
+    const name = (list.children[1] as SymbolNode).name;
+    return watI32Const(registerFuncRef(name, env));
+  }
+
+  // ── Calling a function-typed local via call_indirect ──────────────────────
+  if (locals.has(op) && locals.get(op)!.startsWith(":func:")) {
+    const typeKey = locals.get(op)!.slice(6);
+    let out = "(call_indirect (type $" + typeKey + ")";
+    for (let i = 1; i < list.children.length; i++) {
+      out += " " + codegenExpr(list.children[i], env, locals);
+    }
+    out += " " + watLocalGet(op) + ")";
+    return out;
   }
 
   // ── (call name args...) or implicit call (name args...) ───────────────────

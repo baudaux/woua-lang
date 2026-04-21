@@ -1,0 +1,9 @@
+;; Test: return type mismatch should produce a compile error.
+;;
+;; @expect-error
+
+(defn wrong () :i64
+  42)
+
+(defn main ()
+  (wrong))

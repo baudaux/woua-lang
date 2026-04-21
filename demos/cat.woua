@@ -1,0 +1,40 @@
+;; Demo: cat — open and print a file passed as a command-line argument.
+;;
+;; Usage (from repo root):
+;;   wasmtime --dir=/tmp demos/out/cat.wasm /tmp test.txt
+;;
+;; The first argument is the preopened directory name (matching the --dir= path),
+;; the second is the path to the file relative to that directory.
+;;
+;; WASI requires a preopened directory to be granted at launch (--dir=<path>).
+;; find-preopen scans fds starting at 3 to locate the matching preopen fd,
+;; then open-file calls path_open to get a readable fd for the target file.
+
+(include io)
+(include string)
+
+(defn main ()
+  (if (< (args-count) 3)
+    (progn
+      (printf "usage: cat <preopen-dir> <path>\n")
+      (proc_exit 1))
+    (let dir-arg  :String (args-get 1)
+      (let path-arg :String (args-get 2)
+        (let fd :i32 (open-file dir-arg path-arg 1)
+          (if (< fd 0)
+            (progn
+              (printf "error: could not open %s/%s\n" dir-arg path-arg)
+              (proc_exit 1))
+            (let buf      :ptr (alloc 512)
+              (let iov      :Iovec (alloc (+ (sizeof Iovec) 4))
+                (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
+                  (Iovec/len! iov 512)
+                  (Iovec/base! iov buf)
+                  (let stop :i32 0
+                    (while (= stop 0)
+                      (drop (fd_read fd (as :i32 iov) 1 nread_ptr))
+                      (let nr :i32 (i32.load nread_ptr)
+                        (if (= nr 0)
+                          (set! stop 1)
+                          (write 1 buf nr)))))
+                  (drop (fd_close fd)))))))))))

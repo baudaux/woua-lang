@@ -161,3 +161,71 @@
           (String/ptr! s p)
           (String/len! s n)
           s)))))
+
+;; ── Preopened directories ─────────────────────────────────────────────────────
+;; WASI sandboxes filesystem access via preopened directory fds.
+;; Preopens are assigned fds starting at 3 (after stdin/stdout/stderr).
+;; fd_prestat_get returns EBADF (8) when fd has no preopen — end of scan.
+;;
+;; (find-preopen name buf buf-len)  → fd (i32, -1 if not found)
+;; Scans preopened fds starting at 3.  For each one, reads the directory name
+;; into buf and compares it byte-by-byte against name.
+;; Returns the matching fd, or -1 if none matches.
+(defn find-preopen (name :String buf :ptr buf-len :i32)
+  (let name-ptr :ptr (String/ptr name)
+    (let name-len :i32 (String/len name)
+      (let prestat :ptr (alloc 8)
+        (let fd     :i32 3
+          (let result :i32 -1
+            (let stop   :i32 0
+              (while (= stop 0)
+                (let errno :i32 (fd_prestat_get fd prestat)
+                  (if (= errno 0)
+                    (let dir-len :i32 (i32.load (+ prestat 4))
+                      (if (<= dir-len buf-len)
+                        (progn
+                          (drop (fd_prestat_dir_name fd buf dir-len))
+                          (if (= dir-len name-len)
+                            (let i    :i32 0
+                              (let match :i32 1
+                                (while (< i dir-len)
+                                  (if (= (i32.load8_u (+ buf i))
+                                         (i32.load8_u (+ name-ptr i)))
+                                    (set! i (+ i 1))
+                                    (progn
+                                      (set! match 0)
+                                      (set! i dir-len))))
+                                (if match
+                                  (progn
+                                    (set! result fd)
+                                    (set! stop 1))
+                                  (set! fd (+ fd 1)))))
+                            (set! fd (+ fd 1))))
+                        (set! fd (+ fd 1))))
+                    (set! stop 1))))
+              result)))))))
+
+;; (open-file-at dirfd path readonly) → fd (i32, negative = errno)
+;; Opens path relative to dirfd (a preopened directory fd).
+;;   readonly = 1  → rights: FD_READ | FD_SEEK | FD_TELL  (2|4|32 = 38)
+;;   readonly = 0  → above + FD_DATASYNC | FD_SYNC | FD_WRITE (1|16|64 = 81, total 119)
+;; Returns the new fd on success, or a negative WASI errno on failure.
+(defn open-file-at (dirfd :i32 path :String readonly :i32)
+  (let fd-out :ptr (alloc 4)
+    (let rights :i64 (if readonly 38i64 119i64)
+      (let err :i32 (path_open dirfd 1 (String/ptr path) (String/len path) 0 rights rights 0 fd-out)
+        (if (= err 0)
+          (i32.load fd-out)
+          (* -1 err))))))
+
+;; (open-file dir path readonly) → fd (i32, negative on error)
+;; High-level helper: locates the preopened fd whose name matches dir,
+;; then opens path relative to it.
+;; Returns the new fd on success, -1 if the preopen was not found, or a negative
+;; WASI errno if path_open failed.
+(defn open-file (dir :String path :String readonly :i32)
+  (let scratch :ptr (alloc 256)
+    (let dirfd :i32 (find-preopen dir scratch 256)
+      (if (= dirfd -1)
+        -1
+        (open-file-at dirfd path readonly)))))

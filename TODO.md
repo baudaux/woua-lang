@@ -11,10 +11,12 @@
 - [x] #06 `for` — loop macro in `lib/core.woua`: `(for i 0 n body)` expands to `let` + `while`
 - [x] #07 `assert` — `(assert cond "msg")` macro: prints message and calls `proc_exit 1` if condition is false; invaluable for debugging
 - [x] #40 WAT comments — emit `(;..;)` inline comments in the WAT output to aid readability and debugging; two sources: (1) compiler-generated labels on key constructs (`defn` name, `let` binding name, struct field accesses, generated `__printf_N` purpose); (2) user comments — `;; ...` lines in the source are forwarded as WAT comments attached to the next emitted construct
-- [ ] #41 Explicit return type on `defn` — `(defn name (params...) :ReturnType body...)` declares the return type explicitly instead of relying on inference; the compiler should emit the declared WAT `(result ...)` rather than inferring it from the last body expression; a `:void` annotation means no result; mismatches between declared and inferred type should produce a compile error; this is the last missing piece to make `defn` signatures fully explicit in this strictly-typed language
+- [x] #41 Explicit return type on `defn` — `(defn name (params...) :ReturnType body...)` declares the return type explicitly instead of relying on inference; the compiler should emit the declared WAT `(result ...)` rather than inferring it from the last body expression; a `:void` annotation means no result; mismatches between declared and inferred type should produce a compile error; this is the last missing piece to make `defn` signatures fully explicit in this strictly-typed language
+- [x] #44 Escape sequences in string literals — basic escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\0`) are handled in `readLiteral` in the reader; the only missing escape is `\xNN` (arbitrary hex byte); add two-digit hex parsing after the `\x` prefix in the `readLiteral` escape dispatcher in `reader.ts`
+- [x] #45 `path_open` and preopens in `lib/wasi_p1.woua` — WASI sandboxes file system access via preopened directory fds; before any `path_open` call the program must enumerate them with `fd_prestat_get` / `fd_prestat_dir_name` (scanning fds starting at 3 until `EBADF`); add the missing `defimport` declarations (`fd_prestat_get`, `fd_prestat_dir_name`, `path_open`, `path_create_directory`, `path_unlink_file`, `path_rename`) to `lib/wasi_p1.woua`; add a `(find-preopen dir-name buf)` helper macro that iterates preopened fds and returns the fd whose name matches; add a `(open-file preopen-fd path flags oflags)` convenience wrapper around `path_open`; add a demo program in `demos/` that opens and reads a file passed on the command line
 - [ ] #43 Refactor `:String` — currently `:String` is treated as a bare `i32` (raw pointer) throughout the compiler; replace it with a first-class fat-pointer type `(ptr :i32, len :i32)` stored as two WAT locals or a two-value tuple; string literals should produce a `:String` value (ptr + len) rather than just a raw ptr; `printf %s` and `write` should accept `:String` directly; `(static-ptr msg)` / `(static-len msg)` become derived accessors on `:String`; `watType` should expand `:String` to two WAT values `i32 i32` in function signatures; this is a prerequisite for #08 (sprintf), #23 (static String structs), and any future string-manipulation library
 - [ ] #08 `sprintf` — like `printf` but writes into a `String` buffer instead of stdout; enables building strings at runtime
-- [ ] #09 Numeric conversions — `(i32->i64 x)`, `(i64->i32 x)`, `(f32->i32 x)` etc. as `defop` entries in `lib/core.woua`
+- [x] #09 Numeric conversions — superseded by `(as :Type expr)` which handles all i32↔i64↔f32↔f64 casts with a single unified form (test 11)
 - [ ] #10 `%x` / `%X` in `printf` — hexadecimal output specifier in `lib/io.woua`
 - [x] #11 `printf` generated functions
 - [ ] #12 Tail call optimization — emit `return_call` / `return_call_indirect` WAT instructions for self-tail-calls and mutual tail-calls; mandatory for recursive woua code to be safe at depth (the current `printf-impl` is already a recursive macro, but user `defn` functions risk stack overflow without TCO)
@@ -22,12 +24,12 @@
 
 ## Medium priority
 
-- [ ] #14 First-class functions — pass and store functions as values using WAT function tables + `call_indirect`
+- [x] #14 First-class functions — pass and store functions as values using WAT function tables + `call_indirect`
   - Function type syntax: `(:i32 -> :i32)` for a function taking one i32 and returning one i32
   - `(defn apply (f (:i32 -> :i32) x :i32) (f x))` — function as parameter
   - `(let fn (:i32 -> :i32) my-func ...)` — function stored in a local
   - Compiler maintains a WAT `(table funcref)` and assigns an index to each referenced function
-- [ ] #15 `begin` — sequence macro: `(begin e1 e2 ... en)` without dummy `let _d` workaround
+- [x] #15 `progn` — sequence form: `(progn e1 e2 ... en)` without dummy `let _d` workaround
 - [ ] #16 `when` / `unless` — single-branch conditionals with implicit body sequence
 - [ ] #17 `cond` — multi-branch conditional: `(cond ((test) expr) ... (else expr))`
 - [ ] #18 `let*` — sequential bindings in one block: `(let* ((a 1) (b (+ a 1))) ...)` instead of deeply nested `let`
@@ -63,8 +65,19 @@
 - [ ] #32 Maps (hash maps) — hash function, collision handling, dynamic resizing; depends on arrays (#25) being available first
 - [ ] #33 Separate compilation — compile multiple `.woua` files independently and link them; needed once programs grow large; requires an export/import mechanism between woua modules
 - [ ] #34 VS Code extension — update syntax highlighting to recognise char literals (`'A'`, `'\n'`) and highlight them as numeric literals
-- [ ] #35 `clock_time_get` — wall clock and monotonic timer via WASI; needed for benchmarks and timeouts
+- [x] #35 `lib/time.woua` — time helpers built on top of `clock_time_get` and `clock_res_get` from `wasi_p1.woua`:
+  - `(time-now-ns)` → i64 — monotonic timestamp in nanoseconds (`CLOCK_MONOTONIC`, id=1)
+  - `(time-now-ms)` → i64 — monotonic timestamp in milliseconds
+  - `(time-realtime-ns)` → i64 — wall-clock time in nanoseconds since Unix epoch (`CLOCK_REALTIME`, id=0)
+  - `(time-elapsed-ms start)` → i64 — convenience: `(- (time-now-ms) start)`
+  - Add a `demos/bench.woua` demo that times a simple loop using `time-now-ms`
 - [ ] #36 `random_get` — entropy from the host via WASI; needed for hashing, UUIDs, random number generation
 - [ ] #37 Environment variables — expose `environ_sizes_get` + `environ_get` from WASI; add `(env-get "VAR" buf)` helper in `lib/wasi_p1.woua`
+- [ ] #46 Missing WASI Preview 1 functions — add `defimport` declarations in `lib/wasi_p1.woua` for the functions not yet covered:
+  - **File descriptors**: `fd_advise`, `fd_allocate`, `fd_datasync`, `fd_fdstat_get`, `fd_fdstat_set_flags`, `fd_filestat_get`, `fd_filestat_set_size`, `fd_filestat_set_times`, `fd_pread`, `fd_pwrite`, `fd_readdir`
+  - **Paths**: `path_filestat_get`, `path_filestat_set_times`, `path_link`, `path_readlink`, `path_remove_directory`, `path_symlink`
+  - **Sockets**: `sock_accept`, `sock_recv`, `sock_send`, `sock_shutdown`
+  - **Poll**: `poll_oneoff` — wait on a set of events (WASI equivalent of `select`)
+  - Highest practical value first: `fd_readdir`, `fd_filestat_get`, `path_filestat_get`, `path_remove_directory`, `fd_pread`/`fd_pwrite`, `poll_oneoff`
 
 

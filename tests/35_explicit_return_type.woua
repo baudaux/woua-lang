@@ -1,0 +1,25 @@
+;; Test: explicit scalar return type annotations on defn.
+;;
+;; @expect
+;;   answer=42
+;;   sum=15
+;;   void-fn ok
+
+(include io)
+
+;; Explicit :i32 annotation matching inferred type
+(defn the-answer () :i32
+  42)
+
+;; Explicit :i32 on a function with params
+(defn add3 (a :i32 b :i32 c :i32) :i32
+  (+ a (+ b c)))
+
+;; Explicit :void annotation — no (result ...) emitted
+(defn print-void-ok () :void
+  (printf "void-fn ok\n"))
+
+(defn main ()
+  (printf "answer=%d\n" (the-answer))
+  (printf "sum=%d\n" (add3 4 5 6))
+  (print-void-ok))
