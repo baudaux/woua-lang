@@ -18,8 +18,8 @@
     (progn
       (printf "usage: cat <preopen-dir> <path>\n")
       (proc_exit 1))
-    (let dir-arg  :String (args-get 1)
-      (let path-arg :String (args-get 2)
+    (let dir-arg  :str (args-get 1)
+      (let path-arg :str (args-get 2)
         (let fd :i32 (open-file dir-arg path-arg 1)
           (if (< fd 0)
             (progn
