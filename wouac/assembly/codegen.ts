@@ -50,6 +50,13 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
     if (tupleTypes != null) {
       env.funcTupleResults.set(fname, tupleTypes!);
       env.funcResultTypes.set(fname, ""); // multi-return: no single result type
+    } else {
+      // :str return annotation is treated as a two-value tuple (:i32 :i32).
+      const scalarAnnot = extractScalarReturnAnnotation(list);
+      if (scalarAnnot == ":str") {
+        env.funcTupleResults.set(fname, [":i32", ":i32"]);
+        env.funcResultTypes.set(fname, "");
+      }
     }
   }
 
@@ -344,6 +351,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
   if (node.tag == TAG_FLOAT)  return (node as FloatNode).wide  ? ":f64" : ":f32";
   if (node.tag == TAG_SYMBOL) {
     const sym = (node as SymbolNode).name;
+    if (sym.startsWith("__str:")) return ":str"; // interned string literal
     return locals.has(sym) ? locals.get(sym)! : ":i32";
   }
   if (node.tag == TAG_LIST) {
@@ -449,6 +457,11 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
         const slotKey = typeName + "_" + field;
         return locals.has(slotKey) ? locals.get(slotKey)! : ":i32";
       }
+      // :str fat-pointer accessor: str/ptr → :ptr, str/len → :i32, setters → void
+      if (typeName == "str") {
+        if (field.endsWith("!")) return "";
+        return field == "ptr" ? ":ptr" : ":i32";
+      }
       if (env.types.has(typeName)) {
         const typeInfo = env.types.get(typeName)!;
         if (typeInfo.fields.has(field)) return typeInfo.fields.get(field)!.typeName;
@@ -544,6 +557,7 @@ function inferDefnResultType(list: ListNode, env: Env): string {
       }
     }
     paramLocals.set(pname, ptype);
+    if (ptype == ":str") { paramLocals.set(pname + "_ptr", ":i32"); paramLocals.set(pname + "_len", ":i32"); }
   }
   if (list.children.length <= bodyStart) return "";
   const letLocals = new Map<string, string>();
@@ -644,7 +658,16 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
     const keys = letLocals.keys();
     for (let k = 0; k < keys.length; k++) allLocals.set(keys[k], letLocals.get(keys[k])!);
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, allLocals);
-    if (!letLocals.has(letName)) letLocals.set(letName, typeAnnot);
+    if (!letLocals.has(letName)) {
+      if (typeAnnot == ":str") {
+        // :str locals expand to two WAT locals: name_ptr and name_len.
+        letLocals.set(letName, ":str"); // marker (not a real WAT local)
+        letLocals.set(letName + "_ptr", ":i32");
+        letLocals.set(letName + "_len", ":i32");
+      } else {
+        letLocals.set(letName, typeAnnot);
+      }
+    }
     for (let i = valIdx; i < list.children.length; i++) {
       collectLetLocals(list.children[i], env, paramLocals, letLocals);
     }
@@ -706,9 +729,19 @@ function codegenDefn(list: ListNode, env: Env): string {
   for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k])!);
 
   // Build param declarations
+  // :str params expand to two WAT params: $name_ptr i32 and $name_len i32.
   let paramDecls = "";
   for (let i = 0; i < paramNames.length; i++) {
-    paramDecls += " (param $" + paramNames[i] + " " + watType(paramLocals.get(paramNames[i])!) + ")";
+    const pname = paramNames[i];
+    const ptype = paramLocals.get(pname)!;
+    if (ptype == ":str") {
+      paramDecls += " (param $" + pname + "_ptr i32) (param $" + pname + "_len i32)";
+      // Make _ptr and _len available in paramLocals for downstream type inference.
+      paramLocals.set(pname + "_ptr", ":i32");
+      paramLocals.set(pname + "_len", ":i32");
+    } else {
+      paramDecls += " (param $" + pname + " " + watType(ptype) + ")";
+    }
   }
 
   // Determine return type declaration
@@ -719,7 +752,9 @@ function codegenDefn(list: ListNode, env: Env): string {
     for (let k = 0; k < tupleTypes!.length; k++) rparts += " " + watType(tupleTypes![k]);
     resultDecl = " (result" + rparts + ")";
   } else if (scalarAnnot != null) {
-    if (scalarAnnot != ":void") {
+    if (scalarAnnot == ":str") {
+      resultDecl = " (result i32 i32)"; // :str = fat-pointer (ptr, len)
+    } else if (scalarAnnot != ":void") {
       resultDecl = " (result " + watType(scalarAnnot) + ")";
       // Mismatch check: warn when both declared and inferred are non-empty and differ.
       const inferred = list.children.length > bodyStart
@@ -739,9 +774,12 @@ function codegenDefn(list: ListNode, env: Env): string {
   }
 
   // Hoisted local declarations (all let-bindings at the top of the func body)
+  // :str marker locals are skipped here — their _ptr/_len counterparts are real WAT locals.
   let localDecls = "";
   for (let k = 0; k < letKeys.length; k++) {
-    localDecls += "\n    " + watLocalDecl(letKeys[k], watType(letLocals.get(letKeys[k])!));
+    const lt = letLocals.get(letKeys[k])!;
+    if (lt == ":str") continue; // skip the marker; _ptr and _len are emitted separately
+    localDecls += "\n    " + watLocalDecl(letKeys[k], watType(lt));
   }
 
   // Codegen body expressions (let will emit only local.set, not local decl)
@@ -838,9 +876,19 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
       : watF32Const(f32(fnode.value));
   }
 
-  // Symbol — local variable reference
+  // Symbol — local variable reference (or interned string literal)
   if (node.tag == TAG_SYMBOL) {
-    return watLocalGet((node as SymbolNode).name);
+    const sym = (node as SymbolNode).name;
+    // Interned string literal __str:xxx → two compile-time constants (ptr, len)
+    if (sym.startsWith("__str:") && env.statics.has(sym)) {
+      const info = env.statics.get(sym)!;
+      return "(i32.const " + info.ptr.toString() + ") (i32.const " + info.len.toString() + ")";
+    }
+    // :str local → push two values (ptr, len)
+    if (locals.has(sym) && locals.get(sym)! == ":str") {
+      return "(local.get $" + sym + "_ptr) (local.get $" + sym + "_len)";
+    }
+    return watLocalGet(sym);
   }
 
   // List — call or special form
@@ -1049,6 +1097,22 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       valIdx    = 3;
     }
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, locals);
+    // ── :str binding — two WAT locals (ptr, len) ─────────────────────────────
+    if (typeAnnot == ":str") {
+      const val = codegenExpr(list.children[valIdx], env, locals);
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, ":str");
+      newLocals.set(letName + "_ptr", ":i32");
+      newLocals.set(letName + "_len", ":i32");
+      // val produces two stack values (ptr on bottom, len on top); pop in reverse.
+      let bodyStr = "(; let " + letName + " ;) " + val;
+      bodyStr += "\n    (local.set $" + letName + "_len)";
+      bodyStr += "\n    (local.set $" + letName + "_ptr)";
+      for (let i = valIdx + 1; i < list.children.length; i++) {
+        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals);
+      }
+      return bodyStr;
+    }
     const val       = codegenExpr(list.children[valIdx], env, locals);
     const newLocalsS = copyLocals(locals);
     newLocalsS.set(letName, typeAnnot);
@@ -1133,6 +1197,16 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     // Tuple-local accessor: (pair/0) — no args, prefix is a tuple marker
     if (locals.has(typeName) && locals.get(typeName)! == "tuple") {
       return "(local.get $" + typeName + "_" + field + ")";
+    }
+    // :str fat-pointer accessor — access $varname_ptr or $varname_len directly.
+    if (typeName == "str") {
+      const varNode = list.children[1];
+      const varName = varNode.tag == TAG_SYMBOL ? (varNode as SymbolNode).name : "";
+      if (isSetter) {
+        const val = codegenExpr(list.children[2], env, locals);
+        return "(local.set $" + varName + "_" + field + " " + val + ")";
+      }
+      return "(local.get $" + varName + "_" + field + ")";
     }
     const ptr      = codegenExpr(list.children[1], env, locals);
     if (isSetter) {

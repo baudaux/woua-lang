@@ -1,8 +1,8 @@
-;; String utility library — functions for comparing, slicing, copying,
+;; str utility library — functions for comparing, slicing, copying,
 ;; concatenating, and searching strings.
 ;;
-;; String is a (ptr :ptr, len :i32) struct defined in core.woua.
-;; All functions operate on heap-allocated String structs.
+;; :str is a first-class fat-pointer type (ptr, len) built into the compiler.
+;; String literals produce :str values automatically (no wrapper needed).
 ;;
 ;; Include:
 ;;   (include string)   ;; pulls in core.woua transitively
@@ -13,21 +13,21 @@
 
 ;; (string-len s) → i32  byte length of s
 (defmacro string-len (s)
-  (String/len s))
+  (str/len s))
 
 ;; (string-ptr s) → ptr  raw data pointer of s
 (defmacro string-ptr (s)
-  (String/ptr s))
+  (str/ptr s))
 
 ;; ── Comparison ───────────────────────────────────────────────────────────────
 
 ;; (string= a b) → i32
 ;; Returns 1 if a and b have identical content, 0 otherwise.
-(defn string= (a :String b :String)
-  (if (= (String/len a) (String/len b))
-    (let n   :i32 (String/len a)
-      (let pa  :i32 (String/ptr a)
-        (let pb  :i32 (String/ptr b)
+(defn string= (a :str b :str)
+  (if (= (str/len a) (str/len b))
+    (let n   :i32 (str/len a)
+      (let pa  :i32 (str/ptr a)
+        (let pb  :i32 (str/ptr b)
           (let i   :i32 0
             (let eq  :i32 1
               (while (< i n)
@@ -40,66 +40,57 @@
     0))
 
 ;; (string-eq s "literal") → i32
-;; Compare a runtime String with a compile-time string literal.
+;; Compare a runtime str with a compile-time string literal.
 (defmacro string-eq (s lit)
-  (string= s (string lit)))
+  (string= s lit))
 
 ;; ── Copying ──────────────────────────────────────────────────────────────────
 
-;; (string-copy s) → String
+;; (string-copy s) → str
 ;; Allocate a fresh buffer and copy s into it.
-(defn string-copy (s :String)
-  (let n   :i32 (String/len s)
+(defn string-copy (s :str) :str
+  (let n   :i32 (str/len s)
     (let buf :ptr (alloc n)
       (let i  :i32 0
         (while (< i n)
-          (i32.store8 (+ buf i) (i32.load8_u (+ (String/ptr s) i)))
+          (i32.store8 (+ buf i) (i32.load8_u (+ (str/ptr s) i)))
           (set! i (+ i 1)))
-        (let result :String (alloc (sizeof String))
-          (String/ptr! result buf)
-          (String/len! result n)
-          result)))))
+        (values buf n)))))
 
 ;; ── Slicing ──────────────────────────────────────────────────────────────────
 
-;; (string-slice s offset len) → String
-;; Return a new String header pointing into s's buffer at the given offset.
+;; (string-slice s offset len) → str
+;; Return a new str pointing into s's buffer at the given offset.
 ;; No data is copied. offset + len must not exceed (string-len s).
-(defn string-slice (s :String offset len)
-  (let result :String (alloc (sizeof String))
-    (String/ptr! result (+ (String/ptr s) offset))
-    (String/len! result len)
-    result))
+(defn string-slice (s :str offset len) :str
+  (values (+ (str/ptr s) offset) len))
 
 ;; ── Concatenation ────────────────────────────────────────────────────────────
 
-;; (string-concat a b) → String
+;; (string-concat a b) → str
 ;; Allocate a new buffer containing the bytes of a followed by the bytes of b.
-(defn string-concat (a :String b :String)
-  (let la  :i32 (String/len a)
-    (let lb  :i32 (String/len b)
+(defn string-concat (a :str b :str) :str
+  (let la  :i32 (str/len a)
+    (let lb  :i32 (str/len b)
       (let buf :ptr (alloc (+ la lb))
         (let i  :i32 0
           (while (< i la)
-            (i32.store8 (+ buf i) (i32.load8_u (+ (String/ptr a) i)))
+            (i32.store8 (+ buf i) (i32.load8_u (+ (str/ptr a) i)))
             (set! i (+ i 1)))
           (set! i 0)
           (while (< i lb)
-            (i32.store8 (+ buf (+ la i)) (i32.load8_u (+ (String/ptr b) i)))
+            (i32.store8 (+ buf (+ la i)) (i32.load8_u (+ (str/ptr b) i)))
             (set! i (+ i 1)))
-          (let result :String (alloc (sizeof String))
-            (String/ptr! result buf)
-            (String/len! result (+ la lb))
-            result))))))
+          (values buf (+ la lb)))))))
 
 ;; ── Searching ────────────────────────────────────────────────────────────────
 
 ;; (string-index-of-byte s b) → i32
 ;; Return the index of the first occurrence of byte value b in s,
 ;; or -1 if not found.
-(defn string-index-of-byte (s :String b)
-  (let n     :i32 (String/len s)
-    (let p     :i32 (String/ptr s)
+(defn string-index-of-byte (s :str b)
+  (let n     :i32 (str/len s)
+    (let p     :i32 (str/ptr s)
       (let i     :i32 0
         (let found :i32 -1
           (while (< i n)
@@ -109,3 +100,53 @@
                 (set! i n))
               (set! i (+ i 1))))
           found)))))
+
+;; ── Number → str ─────────────────────────────────────────────────────────────
+
+;; (i32-digits-buf n buf) → ptr
+;; Writes the decimal ASCII digits of n into buf (12 bytes) right-to-left,
+;; starting from buf+11 downward. Returns pointer to the first character.
+;; Handles negative numbers by prepending '-'.
+(defn i32-digits-buf (n buf)
+  (let neg  :i32 (< n 0)
+    (let negabs :i32 (if neg n (- 0 n))
+      (let pos :i32 (+ buf 11)
+        (while (< negabs -9)
+          (i32.store8 pos (- 48 (- negabs (* (/ negabs 10) 10))))
+          (set! pos    (- pos 1))
+          (set! negabs (/ negabs 10)))
+        (i32.store8 pos (- 48 negabs))
+        (if neg
+          (let _dummy :i32 0
+            (set! pos (- pos 1))
+            (i32.store8 pos 45)))
+        pos))))
+
+;; (i32->str n) → str
+(defn i32->str (n) :str
+  (let buf   :ptr (alloc 12)
+    (let start :ptr (i32-digits-buf n buf)
+      (values start (- (+ buf 12) start)))))
+
+;; (i64-digits-buf n buf) → ptr
+;; Like i32-digits-buf but for i64 values. buf must be at least 21 bytes.
+(defn i64-digits-buf (n :i64 buf :ptr)
+  (let neg    :i32 (< n 0i64)
+    (let negabs :i64 (if neg n (- 0i64 n))
+      (let pos :i32 (+ buf 20)
+        (while (< negabs -9i64)
+          (i32.store8 pos (- 48 (as :i32 (- negabs (* (/ negabs 10i64) 10i64)))))
+          (set! pos    (- pos 1))
+          (set! negabs (/ negabs 10i64)))
+        (i32.store8 pos (- 48 (as :i32 negabs)))
+        (if neg
+          (let _dummy :i32 0
+            (set! pos (- pos 1))
+            (i32.store8 pos 45)))
+        pos))))
+
+;; (i64->str n) → str
+(defn i64->str (n :i64) :str
+  (let buf   :ptr (alloc 24)
+    (let start :ptr (i64-digits-buf n buf)
+      (values start (- (+ buf 21) start)))))

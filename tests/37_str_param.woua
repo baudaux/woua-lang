@@ -1,0 +1,17 @@
+;; @test str-param
+;; @feature function taking a :str parameter and printing it
+;; @expect
+;;   hello, world!
+;;   hello, woua!
+;;   hello, woua lang!
+
+(include io)
+(include string)
+
+(defn greet (name :str) :void
+  (printf "hello, %s!\n" name))
+
+(defn main () :void
+  (greet "world")
+  (greet "woua")
+  (greet (string-concat "woua" " lang")))

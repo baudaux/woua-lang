@@ -3,23 +3,14 @@
 ;; Same operator name can be declared multiple times for different types;
 ;; the compiler selects the right overload via type inference.
 
-;; ── String ────────────────────────────────────────────────────────────────────
-;; A string literal "..." is detected by the compiler and auto-allocated in
-;; linear memory at compile time. (static-ptr "s") and (static-len "s") resolve
-;; to the byte pointer and length as compile-time constants.
+;; ── str ─────────────────────────────────────────────────────────────────────
+;; :str is a first-class fat-pointer type (ptr :i32, len :i32) built into the
+;; compiler. String literals "..." are interned into linear memory at compile
+;; time and automatically produce a (ptr, len) two-value :str.
+;; No heap allocation is needed for str headers.
 ;;
-;; String is the runtime struct type for a (ptr, len) pair.
-(deftype String
-  (ptr :ptr)
-  (len :i32))
-
-;; (string "literal") allocates a String struct on the heap and fills it.
-;; Use this when you need to pass a string as a single value at runtime.
-(defmacro string (s)
-  (let __s :String (alloc (sizeof String))
-    (String/ptr! __s (static-ptr s))
-    (String/len! __s (static-len s))
-    __s))
+;; (static-ptr "s") and (static-len "s") still work as compile-time constants
+;; when raw access to the pointer or length is needed.
 
 ;; ── Literal recognition ──────────────────────────────────────────────────────
 ;; (defliteral name "regex" :node-type)
@@ -132,66 +123,4 @@
 (defop <= "f64.le" (:f64 :f64) :i32)
 (defop >= "f64.ge" (:f64 :f64) :i32)
 
-;; ── Number → String conversion ───────────────────────────────────────────────
-;;
-;; i32-digits-buf n buf
-;;   Writes the decimal ASCII digits of n into buf (12 bytes) right-to-left,
-;;   starting from buf+11 downward.  Returns the pointer to the first character.
-;;   Handles negative numbers by prepending '-'.
-;;
-;; i32->string n
-;;   Allocates a scratch buffer and a String struct, fills them via
-;;   i32-digits-buf, and returns the String struct pointer.
 
-(defn i32-digits-buf (n buf)
-  (let neg  :i32 (< n 0)
-    ;; Work with a negative magnitude to avoid INT_MIN overflow.
-    ;; (- 0 INT_MIN) wraps, so instead we always work in the negative domain:
-    ;; negabs = -|n| = n when n<0, else -n.
-    (let negabs :i32 (if neg n (- 0 n))
-      (let pos :i32 (+ buf 11)
-        ;; Extract digits using negabs; each digit is -(negabs mod 10) ∈ [0,9].
-        (while (< negabs -9)
-          (i32.store8 pos (- 48 (- negabs (* (/ negabs 10) 10))))
-          (set! pos    (- pos 1))
-          (set! negabs (/ negabs 10)))
-        (i32.store8 pos (- 48 negabs))
-        (if neg
-          (let _dummy :i32 0
-            (set! pos (- pos 1))
-            (i32.store8 pos 45)))
-        pos))))
-
-(defn i32->string (n)
-  (let buf   :ptr (alloc 12)
-    (let start :ptr (i32-digits-buf n buf)
-      (let s :String (alloc (sizeof String))
-        (String/ptr! s start)
-        (String/len! s (- (+ buf 12) start))
-        s))))
-
-;; i64-digits-buf n buf
-;;   Like i32-digits-buf but for i64 values. buf must be at least 21 bytes.
-;;   Returns pointer to first character.
-(defn i64-digits-buf (n :i64 buf :ptr)
-  (let neg    :i32 (< n 0i64)
-    (let negabs :i64 (if neg n (- 0i64 n))
-      (let pos :i32 (+ buf 20)
-        (while (< negabs -9i64)
-          (i32.store8 pos (- 48 (as :i32 (- negabs (* (/ negabs 10i64) 10i64)))))
-          (set! pos    (- pos 1))
-          (set! negabs (/ negabs 10i64)))
-        (i32.store8 pos (- 48 (as :i32 negabs)))
-        (if neg
-          (let _dummy :i32 0
-            (set! pos (- pos 1))
-            (i32.store8 pos 45)))
-        pos))))
-
-(defn i64->string (n :i64)
-  (let buf   :ptr (alloc 24)
-    (let start :ptr (i64-digits-buf n buf)
-      (let s :String (alloc (sizeof String))
-        (String/ptr! s start)
-        (String/len! s (- (+ buf 21) start))
-        s))))

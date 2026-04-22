@@ -73,7 +73,7 @@ Demos: `hello_world`, `echo`, `cat`, `bench`.
 
 The include chain: `io` → `wasi_p1` → `core`.
 
-- `core` registers literal patterns, operators, and the `String` type.
+- `core` registers literal patterns and operators. String literals produce `:str` fat-pointers `(ptr, len)` automatically — no heap allocation or wrapper needed.
 - `wasi_p1` imports all WASI Preview 1 functions.
 - `io` defines the `Iovec` struct, `write`, `printf`, `read-line`, `args-count`, `args-get`, and the filesystem helpers.
 
@@ -82,10 +82,10 @@ The include chain: `io` → `wasi_p1` → `core`.
 ```
 woua/
   lib/              Standard library (woua source)
-    core.woua         Operators, literals, String type, number-to-string
+    core.woua         Operators, literals, :str fat-pointer type
     wasi_p1.woua      WASI Preview 1 defimports
     io.woua           I/O: write, printf, read-line, args, file open helpers
-    string.woua       String comparison, copy, slice, concat, search
+    string.woua       str comparison, copy, slice, concat, search, int-to-str
     time.woua         Monotonic + wall-clock time via WASI
   demos/
     hello_world.woua  Print "Hello, World!"
@@ -169,11 +169,12 @@ Includes are processed eagerly and deduplicated.
   (* x factor))
 
 ;; Void function (no result)
-(defn greet (name :String) :void
+(defn greet (name :str) :void
   (printf "Hello %s\n" name))
 
 (defn main () :void
-  (printf "result=%d\n" (add 3 4)))
+  (let s :str "world"
+    (greet s)))
 ```
 - Parameter types default to `:i32` when omitted.
 - Return type can be declared explicitly after the parameter list with `:ReturnType`.
@@ -190,7 +191,7 @@ Includes are processed eagerly and deduplicated.
 | `3.14` `-1.5` | f32 literal |
 | `2.718f64` | f64 literal |
 | `0xFF` `0xDEADi64` | hex i32 / i64 literal |
-| `"text"` | string literal (auto-interned into linear memory) |
+| `"text"` | string literal — produces a `:str` fat-pointer `(ptr, len)` automatically; no wrapper needed |
 | `(op a b)` | operator call — overload selected by argument types |
 | `(if cond then)` | conditional, void (no else) |
 | `(if cond then else)` | conditional expression — both branches must match |
@@ -293,7 +294,7 @@ Multiple signatures for the same operator name are resolved by argument types.
 (defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
 ```
 Longer patterns must be declared before shorter ones that match the same prefix.  
-String literals support `\n \t \r \\ \" \0 \xNN` escape sequences.
+str literals support `\n \t \r \\ \" \0 \xNN` escape sequences.
 
 ### Declaring struct types
 ```woua
@@ -322,13 +323,23 @@ Inline string literals are auto-interned and deduplicated — no `defstatic` nee
 ## Standard library
 
 ### `lib/core.woua`
-Literal patterns, arithmetic/comparison/bitwise operators for i32/i64/f32/f64, the `String` type, and number-to-string conversion.
+Literal patterns and arithmetic/comparison/bitwise operators for i32/i64/f32/f64.
 
-| Function | Signature | Description |
+### `lib/string.woua`
+Str utilities (includes `core`):
+
+| Function / Macro | Signature | Description |
 |---|---|---|
-| `i32->string` | `(n :i32) → :String` | Convert i32 to decimal string |
-| `i64->string` | `(n :i64) → :String` | Convert i64 to decimal string |
-| `string` | `(s) → :String` | Wrap a string literal as a runtime `String` struct |
+| `string-len` | `(s :str) → :i32` | Byte length |
+| `string-ptr` | `(s :str) → :ptr` | Raw data pointer |
+| `string=` | `(a :str b :str) → :i32` | Content equality |
+| `string-eq` | `(s :str "literal") → :i32` | Compare with a compile-time literal |
+| `string-copy` | `(s :str) → :str` | Deep copy |
+| `string-slice` | `(s :str offset len) → :str` | Slice (no copy) |
+| `string-concat` | `(a :str b :str) → :str` | Concatenate |
+| `string-index-of-byte` | `(s :str b :i32) → :i32` | First index of byte, or -1 |
+| `i32->str` | `(n :i32) → :str` | Convert i32 to decimal string |
+| `i64->str` | `(n :i64) → :str` | Convert i64 to decimal string |
 
 ### `lib/wasi_p1.woua`
 `defimport` declarations for the WASI Preview 1 functions currently supported:
@@ -346,26 +357,15 @@ I/O helpers (includes `wasi_p1`):
 | `write` | `(fd ptr len)` | Write raw bytes to a fd |
 | `printf` | `(fmt args...)` | Formatted print to stdout (`%d %s %f %x`) |
 | `assert` | `(cond "msg")` | Print message and exit 1 if false |
-| `read-line` | `(fd buf maxlen) → :i32` | Read one line; returns byte count |
+| `read-line` | `(fd buf maxlen) → :str` | Read one line; returns a `:str` pointing into buf |
 | `args-count` | `() → :i32` | Number of CLI arguments |
-| `args-get` | `(i :i32) → :String` | i-th CLI argument as a `String` |
-| `find-preopen` | `(name :String buf :ptr buf-len :i32) → :i32` | Scan WASI preopens for a matching dir name; returns fd or -1 |
-| `open-file-at` | `(dirfd :i32 path :String readonly :i32) → :i32` | Open a file relative to a preopened fd |
-| `open-file` | `(dir :String path :String readonly :i32) → :i32` | Find preopen + open file in one call |
+| `args-get` | `(i :i32) → :str` | i-th CLI argument as a `str` |
+| `find-preopen` | `(name :str buf :ptr buf-len :i32) → :i32` | Scan WASI preopens for a matching dir name; returns fd or -1 |
+| `open-file-at` | `(dirfd :i32 path :str readonly :i32) → :i32` | Open a file relative to a preopened fd |
+| `open-file` | `(dir :str path :str readonly :i32) → :i32` | Find preopen + open file in one call |
 
 ### `lib/string.woua`
-String utilities (includes `core`):
-
-| Function / Macro | Signature | Description |
-|---|---|---|
-| `string-len` | `(s :String) → :i32` | Byte length |
-| `string-ptr` | `(s :String) → :ptr` | Raw data pointer |
-| `string=` | `(a :String b :String) → :i32` | Content equality |
-| `string-eq` | `(s :String "literal") → :i32` | Compare with a compile-time literal |
-| `string-copy` | `(s :String) → :String` | Deep copy |
-| `string-slice` | `(s :String offset len) → :String` | Slice (no copy) |
-| `string-concat` | `(a :String b :String) → :String` | Concatenate |
-| `string-index-of-byte` | `(s :String b :i32) → :i32` | First index of byte, or -1 |
+See the table above (included via `lib/string.woua`).
 
 ### `lib/time.woua`
 Time helpers built on `clock_time_get` (includes `wasi_p1`):

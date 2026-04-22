@@ -20,22 +20,22 @@
     (Iovec/len!  __write_iov len)
     (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
 
-;; write-string: like write but takes a runtime String struct instead of
+;; write-string: like write but takes a runtime str struct instead of
 ;; compile-time static-ptr/static-len.
 (defmacro write-string (fd s)
-  (write fd (String/ptr s) (String/len s)))
+  (write fd (str/ptr s) (str/len s)))
 
-;; print-string: print a runtime String struct to stdout.
+;; print-string: print a runtime str struct to stdout.
 (defmacro print-string (s)
   (write-string 1 s))
 
-;; print-int: convert an i32 to string and print it to stdout.
+;; print-int: convert an i32 to str and print it to stdout.
 (defmacro print-int (n)
-  (print-string (i32->string n)))
+  (print-string (i32->str n)))
 
-;; print-int64: convert an i64 to string and print it to stdout.
+;; print-int64: convert an i64 to str and print it to stdout.
 (defmacro print-int64 (n)
-  (print-string (i64->string n)))
+  (print-string (i64->str n)))
 
 ;; print-char: print a single byte value as a character to stdout.
 (defmacro print-char (c)
@@ -64,7 +64,7 @@
 ;; The format string must be a string literal. Supported specifiers:
 ;;   %d / %i    → print-int   (i32)
 ;;   %ld / %li  → print-int64 (i64)
-;;   %s         → print-string (String)
+;;   %s         → print-string (str)
 ;;   %c         → print-char  (byte as i32)
 ;;   %%         → literal %
 ;;
@@ -99,9 +99,9 @@
   (drop (printf-impl fmt 0 args)))
 
 ;; read-line: read one line from fd into buf (up to maxlen bytes), byte by byte.
-;; Strips the trailing newline. Returns a String pointing into buf,
-;; or a zero-length String on EOF.
-(defn read-line (fd buf maxlen)
+;; Strips the trailing newline. Returns a str pointing into buf,
+;; or a zero-length str on EOF.
+(defn read-line (fd buf maxlen) :str
   (let iov      :Iovec (alloc (+ (sizeof Iovec) 4))
     (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/len! iov 1)
@@ -115,10 +115,7 @@
               (if (= (i32.load8_u (+ buf len)) 10)
                 (set! stop 1)
                 (set! len (+ len 1)))))
-          (let s :String (alloc (sizeof String))
-            (String/ptr! s buf)
-            (String/len! s len)
-            s))))))
+          (values buf len))))))
 
 ;; ── Command-line arguments ────────────────────────────────────────────────────
 
@@ -148,19 +145,16 @@
   (__args-init)
   (i32.load (static-ptr __args_argc)))
 
-;; (args-get i) → String
-;; Returns the i-th command-line argument as a String.
-(defn args-get (i :i32)
+;; (args-get i) → str
+;; Returns the i-th command-line argument as a str.
+(defn args-get (i :i32) :str
   (__args-init)
   (let argv :ptr (i32.load (static-ptr __args_argv))
     (let p :ptr (i32.load (+ argv (* i 4)))
       (let n :i32 0
         (while (i32.load8_u (+ p n))
           (set! n (+ n 1)))
-        (let s :String (alloc (sizeof String))
-          (String/ptr! s p)
-          (String/len! s n)
-          s)))))
+        (values p n)))))
 
 ;; ── Preopened directories ─────────────────────────────────────────────────────
 ;; WASI sandboxes filesystem access via preopened directory fds.
@@ -171,9 +165,9 @@
 ;; Scans preopened fds starting at 3.  For each one, reads the directory name
 ;; into buf and compares it byte-by-byte against name.
 ;; Returns the matching fd, or -1 if none matches.
-(defn find-preopen (name :String buf :ptr buf-len :i32)
-  (let name-ptr :ptr (String/ptr name)
-    (let name-len :i32 (String/len name)
+(defn find-preopen (name :str buf :ptr buf-len :i32)
+  (let name-ptr :ptr (str/ptr name)
+    (let name-len :i32 (str/len name)
       (let prestat :ptr (alloc 8)
         (let fd     :i32 3
           (let result :i32 -1
@@ -210,10 +204,10 @@
 ;;   readonly = 1  → rights: FD_READ | FD_SEEK | FD_TELL  (2|4|32 = 38)
 ;;   readonly = 0  → above + FD_DATASYNC | FD_SYNC | FD_WRITE (1|16|64 = 81, total 119)
 ;; Returns the new fd on success, or a negative WASI errno on failure.
-(defn open-file-at (dirfd :i32 path :String readonly :i32)
+(defn open-file-at (dirfd :i32 path :str readonly :i32)
   (let fd-out :ptr (alloc 4)
     (let rights :i64 (if readonly 38i64 119i64)
-      (let err :i32 (path_open dirfd 1 (String/ptr path) (String/len path) 0 rights rights 0 fd-out)
+      (let err :i32 (path_open dirfd 1 (str/ptr path) (str/len path) 0 rights rights 0 fd-out)
         (if (= err 0)
           (i32.load fd-out)
           (* -1 err))))))
@@ -223,7 +217,7 @@
 ;; then opens path relative to it.
 ;; Returns the new fd on success, -1 if the preopen was not found, or a negative
 ;; WASI errno if path_open failed.
-(defn open-file (dir :String path :String readonly :i32)
+(defn open-file (dir :str path :str readonly :i32)
   (let scratch :ptr (alloc 256)
     (let dirfd :i32 (find-preopen dir scratch 256)
       (if (= dirfd -1)

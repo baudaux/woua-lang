@@ -10,7 +10,7 @@
 
 (defn main ()
   ;; \x41 = 'A' (0x41 = 65)
-  (printf "%s\n" (string "\x41"))
+  (printf "%s\n" "\x41")
   ;; Mix of \t (tab) and regular chars
   (printf "tab\tend\n")
   ;; \x40 = '@'

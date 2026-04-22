@@ -370,7 +370,7 @@ function parsePrintfFormat(fmt: string, argTypes: Array<string>, env: Env): Arra
         litBuf = "";
       }
       if (spec == "d" || spec == "i") { segments.push("A:i32");  argTypes.push("i32"); i++; }
-      else if (spec == "s")           { segments.push("A:str");  argTypes.push("i32"); i++; }
+      else if (spec == "s")           { segments.push("A:str");  argTypes.push("i32"); argTypes.push("i32"); i++; }
       else if (spec == "c")           { segments.push("A:char"); argTypes.push("i32"); i++; }
       else if (spec == "l")           { i++; i++; segments.push("A:i64"); argTypes.push("i64"); }
       else if (spec == "%")           { litBuf += "%"; i++; }
@@ -409,7 +409,8 @@ function buildPrintfFunc(fmt: string, funcName: string, env: Env): string {
   }
   wat += " (result i32)\n";
   if (segments.length > 0) {
-    wat += "    (local $__s i32)\n";
+    wat += "    (local $__s_ptr i32)\n";
+    wat += "    (local $__s_len i32)\n";
     wat += "    (local $__iov i32)\n";
   }
 
@@ -427,35 +428,40 @@ function buildPrintfFunc(fmt: string, funcName: string, env: Env): string {
       wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.const " + len.toString() + "))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
     } else if (seg == "A:i32") {
-      // i32 → decimal string via $i32->string
-      wat += "    (local.set $__s (call $i32->string (local.get $a" + curArg.toString() + ")))\n";
+      // i32 → decimal string via $i32->str (returns two-value :str)
+      wat += "    (call $i32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
       wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
-      wat += "    (i32.store (local.get $__iov) (i32.load (local.get $__s)))\n";
-      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get $__s) (i32.const 4))))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (local.get $__s_len))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
       curArg++;
     } else if (seg == "A:i64") {
-      // i64 → decimal string via $i64->string
-      wat += "    (local.set $__s (call $i64->string (local.get $a" + curArg.toString() + ")))\n";
+      // i64 → decimal string via $i64->str (returns two-value :str)
+      wat += "    (call $i64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
       wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
-      wat += "    (i32.store (local.get $__iov) (i32.load (local.get $__s)))\n";
-      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get $__s) (i32.const 4))))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (local.get $__s_len))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
       curArg++;
     } else if (seg == "A:str") {
-      // String struct arg — ptr at offset 0, len at offset 4
-      const an = "$a" + curArg.toString();
+      // :str fat-pointer arg — two consecutive i32 params (ptr, len)
+      const ptrParam = "$a" + curArg.toString();
+      const lenParam = "$a" + (curArg + 1).toString();
       wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
-      wat += "    (i32.store (local.get $__iov) (i32.load (local.get " + an + ")))\n";
-      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.load (i32.add (local.get " + an + ") (i32.const 4))))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get " + ptrParam + "))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (local.get " + lenParam + "))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
-      curArg++;
+      curArg += 2; // two params for one :str arg
     } else if (seg == "A:char") {
       // Single byte arg — store byte then fd_write 1 byte
-      wat += "    (local.set $__s (call $alloc (i32.const 4)))\n";
-      wat += "    (i32.store8 (local.get $__s) (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_ptr (call $alloc (i32.const 4)))\n";
+      wat += "    (i32.store8 (local.get $__s_ptr) (local.get $a" + curArg.toString() + "))\n";
       wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
-      wat += "    (i32.store (local.get $__iov) (local.get $__s))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
       wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.const 1))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
       curArg++;
