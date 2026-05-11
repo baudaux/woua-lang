@@ -4,11 +4,35 @@
 // User-defined macros are expanded recursively wherever they appear.
 // Other forms are passed through to codegen.
 
-import { Node, ListNode, SymbolNode, IntNode, StringNode, RegexNode,
+import { Node, ListNode, SymbolNode, IntNode, FloatNode, StringNode, RegexNode,
          MacroListNode, CommentNode,
-         TAG_INT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST,
+         TAG_INT, TAG_FLOAT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST,
          TAG_COMMENT } from "./ast";
-import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo } from "./env";
+import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo, ProtocolInfo, ProtocolMethodSig, GlobalInfo } from "./env";
+
+// Register one WAT global per leaf field of a value-type struct.
+// Recurses into embedded structs so nested value types are fully flattened.
+function registerValueTypeSubGlobals(prefix: string, typeName: string, env: Env): void {
+  const typeInfo = env.types.get(typeName)!;
+  const fnames = typeInfo.fieldNames;
+  for (let fi = 0; fi < fnames.length; fi++) {
+    const fname = fnames[fi];
+    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const sub   = prefix + "_" + fname;
+    // Embedded value-type struct field → recurse
+    if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+      registerValueTypeSubGlobals(sub, ft.slice(1), env);
+    } else {
+      let initWat: string;
+      if (ft == ":i64")       initWat = "(i64.const 0)";
+      else if (ft == ":f32")  initWat = "(f32.const 0.0)";
+      else if (ft == ":f64")  initWat = "(f64.const 0.0)";
+      else                    initWat = "(i32.const 0)";
+      env.globals.set(sub, new GlobalInfo(ft, initWat, false));
+      env.globalNames.push(sub);
+    }
+  }
+}
 import { expandDefstatic, expandDeftype, internString } from "./macros";
 import { watData } from "./primitives";
 
@@ -98,6 +122,17 @@ function expandNode(node: Node, env: Env): Node {
   if (node.tag == TAG_MACROLIST) return node;
   // CommentNodes pass through unchanged to codegen.
   if (node.tag == TAG_COMMENT) return node;
+  // Bare symbol that names a zero-param macro (defconst) → expand immediately.
+  if (node.tag == TAG_SYMBOL) {
+    const symName = (node as SymbolNode).name;
+    if (env.macros.has(symName)) {
+      const m = env.macros.get(symName)!;
+      if (m.params.length == 0 && m.restParam == "") {
+        return expandNode(expandMacroCall(m, new Array<Node>(), env), env);
+      }
+    }
+    return node;
+  }
   if (node.tag != TAG_LIST) return node;
   const list = node as ListNode;
   if (list.children.length == 0) return node;
@@ -122,14 +157,22 @@ function expandNode(node: Node, env: Env): Node {
     // compile-time sizeof intrinsic (usable outside macro bodies too)
     if (name == "sizeof") {
       const typeName = (list.children[1] as SymbolNode).name;
-      if (!env.types.has(typeName)) {
+      // Primitive types (accept with or without ':' prefix)
+      if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr" ||
+          typeName == "i32"  || typeName == "f32"  || typeName == "ptr")  return new IntNode(4 as i64);
+      if (typeName == ":i64" || typeName == ":f64" ||
+          typeName == "i64"  || typeName == "f64")                        return new IntNode(8 as i64);
+      if (typeName.startsWith(":*")) return new IntNode(4 as i64); // heap pointer
+      // User-defined struct type (name may come with or without ':')
+      const structName = typeName.startsWith(":") ? typeName.slice(1) : typeName;
+      if (!env.types.has(structName)) {
         env.errors.push("sizeof: unknown type '" + typeName + "'");
         return new IntNode(0 as i64);
       }
-      return new IntNode(env.types.get(typeName)!.size as i64);
+      return new IntNode(env.types.get(structName)!.size as i64);
     }
-    // compile-time static-ptr / static-len intrinsics
-    if (name == "static-ptr" || name == "static-len") {
+    // compile-time static-ptr / static-len / static-ref intrinsics
+    if (name == "static-ptr" || name == "static-len" || name == "static-ref") {
       const argNode = expandNode(list.children[1], env);
       const symName = (argNode as SymbolNode).name;
       if (!env.statics.has(symName)) {
@@ -137,7 +180,17 @@ function expandNode(node: Node, env: Env): Node {
         return new IntNode(0 as i64);
       }
       const info = env.statics.get(symName)!;
-      const val = name == "static-ptr" ? info.ptr as i64 : info.len as i64;
+      // static-ref  → header address (only meaningful for :str statics)
+      // static-ptr  → for :str statics, base = hdrPtr+8; otherwise ptr
+      // static-len  → byte length
+      let val: i64;
+      if (name == "static-ref") {
+        val = info.ptr as i64;
+      } else if (name == "static-ptr") {
+        val = info.typeName == ":*str" ? (info.ptr + 8) as i64 : info.ptr as i64;
+      } else {
+        val = info.len as i64;
+      }
       return new IntNode(val);
     }
 
@@ -290,7 +343,7 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
     const list = node as ListNode;
     if (list.children.length > 0 && list.children[0].tag == TAG_SYMBOL) {
       const head = (list.children[0] as SymbolNode).name;
-      if (head == "static-ptr" || head == "static-len") {
+      if (head == "static-ptr" || head == "static-len" || head == "static-ref") {
         // By the time we get here, the arg is always a SymbolNode
         // (strings were already interned above into __str:... symbols).
         const argNode = substituteNode(list.children[1], subst, env);
@@ -300,17 +353,30 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
           return new IntNode(0 as i64);
         }
         const info = env.statics.get(symName)!;
-        const val = head == "static-ptr" ? info.ptr as i64 : info.len as i64;
+        let val: i64;
+        if (head == "static-ref") {
+          val = info.ptr as i64;
+        } else if (head == "static-ptr") {
+          val = info.typeName == ":*str" ? (info.ptr + 8) as i64 : info.ptr as i64;
+        } else {
+          val = info.len as i64;
+        }
         return new IntNode(val);
       }
       if (head == "sizeof") {
         const argNode  = substituteNode(list.children[1], subst, env);
         const typeName = (argNode as SymbolNode).name;
-        if (!env.types.has(typeName)) {
+        if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr" ||
+            typeName == "i32"  || typeName == "f32"  || typeName == "ptr")  return new IntNode(4 as i64);
+        if (typeName == ":i64" || typeName == ":f64" ||
+            typeName == "i64"  || typeName == "f64")                        return new IntNode(8 as i64);
+        if (typeName.startsWith(":*")) return new IntNode(4 as i64);
+        const structName = typeName.startsWith(":") ? typeName.slice(1) : typeName;
+        if (!env.types.has(structName)) {
           env.errors.push("sizeof: unknown type '" + typeName + "'");
           return new IntNode(0 as i64);
         }
-        return new IntNode(env.types.get(typeName)!.size as i64);
+        return new IntNode(env.types.get(structName)!.size as i64);
       }
     }
     const result = new ListNode();
@@ -594,6 +660,105 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
       continue;
     }
 
+    // ── (defconst name val) — compile-time named constant ─────────────────
+    // Sugar for a zero-param macro: (defconst FOO 42) makes (FOO) expand to 42.
+    if (headName == "defconst") {
+      // children: [defconst, name, val]
+      const constName = (list.children[1] as SymbolNode).name;
+      const constVal  = list.children[2];
+      env.macros.set(constName, new MacroInfo(new Array<string>(), "", constVal));
+      continue;
+    }
+    // ── (defvar name [:Type] val) — mutable global variable ──────────────────
+    // Declares a WAT mutable global.  Type is optional, defaults to :i32.
+    // Use (set! name val) to mutate, bare name to read.
+    if (headName == "defvar") {
+      // children: [defvar, name, :Type?, initval]
+      const varName  = (list.children[1] as SymbolNode).name;
+      let   typeName = ":i32";
+      let   initNode: Node;
+      // (defvar name :Type init) — 4 children
+      if (list.children.length == 4 &&
+          list.children[2].tag == TAG_SYMBOL &&
+          (list.children[2] as SymbolNode).name.startsWith(":")) {
+        typeName = (list.children[2] as SymbolNode).name;
+        initNode = list.children[3];
+      // (defvar name :Type) — 3 children, type only (no init; valid for value-type structs)
+      } else if (list.children.length == 3 &&
+                 list.children[2].tag == TAG_SYMBOL &&
+                 (list.children[2] as SymbolNode).name.startsWith(":")) {
+        typeName = (list.children[2] as SymbolNode).name;
+        initNode = list.children[2]; // unused for value-type path; safe placeholder
+      } else {
+        initNode = list.children[2];
+      }
+      // Value-type struct: ":TypeName" (not :*T, not primitive) → sub-globals
+      const isValueStruct = typeName != ":i32" && typeName != ":i64" &&
+                            typeName != ":f32" && typeName != ":f64" &&
+                            typeName != ":ptr" && !typeName.startsWith(":*") &&
+                            typeName.length > 1 && env.types.has(typeName.slice(1));
+      // Ref-type struct: ":*TypeName" → single i32 global (heap pointer), no init allowed
+      const isRefStruct = typeName.startsWith(":*") && env.types.has(typeName.slice(2));
+      if (isValueStruct || isRefStruct) {
+        if (list.children.length > 3) {
+          const kind = isValueStruct ? "value-type" : "ref-type";
+          env.errors.push("defvar: '" + varName + "' has " + kind + " '" + typeName +
+                          "' — cannot supply an init value; initialize to zero implicitly. " +
+                          "Use (set! " + varName + " (" + typeName.slice(isValueStruct ? 1 : 2) + " ...)) after declaration.");
+          continue;
+        }
+        if (isRefStruct) {
+          if (env.globals.has(varName)) {
+            env.errors.push("defvar: duplicate global name '" + varName + "'");
+            continue;
+          }
+          env.globals.set(varName, new GlobalInfo(typeName, "(i32.const 0)", false));
+          env.globalNames.push(varName);
+          continue;
+        }
+        // Value-type: register marker + sub-globals
+        if (env.globals.has(varName)) {
+          env.errors.push("defvar: duplicate global name '" + varName + "'");
+          continue;
+        }
+        // Register a marker (not emitted as WAT global) so typeOf can resolve it
+        env.globals.set(varName, new GlobalInfo(typeName, "", true));
+        env.globalNames.push(varName);
+        // Register one sub-global per leaf field
+        registerValueTypeSubGlobals(varName, typeName.slice(1), env);
+        continue;
+      }
+      // Build the WAT initializer: must be a constant expression.
+      // We first parse the node, then reconcile with declared type so the
+      // WAT instruction matches (e.g. (defvar x :f32 0) must use f32.const 0).
+      let initVal: f64 = 0;           // numeric value extracted from node
+      let initIsFloat: bool = false;  // was the literal a float node?
+      if (initNode.tag == TAG_INT) {
+        initVal = f64((initNode as IntNode).value);
+      } else if (initNode.tag == TAG_FLOAT) {
+        initVal     = (initNode as FloatNode).value;
+        initIsFloat = true;
+      }
+      // Pick the right WAT const based on the declared type
+      let initWat: string;
+      if (typeName == ":i64") {
+        initWat = "(i64.const " + i64(initVal).toString() + ")";
+      } else if (typeName == ":f32") {
+        initWat = "(f32.const " + f32(initVal).toString() + ")";
+      } else if (typeName == ":f64") {
+        initWat = "(f64.const " + f64(initVal).toString() + ")";
+      } else {
+        // :i32, :ptr, user struct pointer — all i32
+        initWat = "(i32.const " + i32(initVal).toString() + ")";
+      }
+      if (env.globals.has(varName)) {
+        env.errors.push("defvar: duplicate global name '" + varName + "'");
+        continue;
+      }
+      env.globals.set(varName, new GlobalInfo(typeName, initWat));
+      env.globalNames.push(varName);
+      continue;
+    }
     // ── (defimport name "module" "field" (param-types...) result-type?) ─────
     if (headName == "defimport") {
       // children: [defimport, name, "module", "field", (params...), result?]
@@ -621,6 +786,134 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
       const isStatic = list.children.length > 4 &&
                        (list.children[4] as SymbolNode).name == ":static";
       env.literals.set(litName, new LiteralInfo(litName, pattern, nodeType, isStatic));
+      continue;
+    }
+
+    // ── (defprotocol Name (method (self :*Self ...) :RetType) ...) ────────────
+    if (headName == "defprotocol") {
+      // children: [defprotocol, Name, (method (self :*Self ...) :RetType)...]
+      const protoName = (list.children[1] as SymbolNode).name;
+      if (env.protocols.has(protoName)) {
+        env.errors.push("defprotocol: duplicate protocol name '" + protoName + "'");
+        continue;
+      }
+      const proto = new ProtocolInfo();
+      for (let j = 2; j < list.children.length; j++) {
+        const spec       = list.children[j] as ListNode;
+        const methodName = (spec.children[0] as SymbolNode).name;
+        const paramsNode = spec.children[1] as ListNode;
+        // Param types are at odd indices (0 = name, 1 = type, 2 = name, 3 = type...)
+        const params = new Array<string>();
+        for (let k = 1; k < paramsNode.children.length; k += 2) {
+          params.push((paramsNode.children[k] as SymbolNode).name);
+        }
+        const resultAnnot = spec.children.length >= 3
+          ? (spec.children[2] as SymbolNode).name
+          : ":void";
+        const result = resultAnnot == ":void" ? "" : resultAnnot;
+        proto.methods.set(methodName, new ProtocolMethodSig(params, result));
+        proto.methodNames.push(methodName);
+      }
+      env.protocols.set(protoName, proto);
+      continue;
+    }
+
+    // ── (defimpl ProtocolName TypeName (defn method ...) ...) ────────────────
+    // Registers each defn under a mangled name (TypeName__method), auto-creates
+    // a defop that dispatches to it, and verifies the full protocol is satisfied.
+    if (headName == "defimpl") {
+      // children: [defimpl, ProtocolName, TypeName, (defn method body...)...]
+      const protoName = (list.children[1] as SymbolNode).name;
+      const typeName  = (list.children[2] as SymbolNode).name;
+      if (!env.protocols.has(protoName)) {
+        env.errors.push("defimpl: unknown protocol '" + protoName + "'");
+        continue;
+      }
+      const proto = env.protocols.get(protoName)!;
+      const provided = new Set<string>();
+
+      for (let j = 3; j < list.children.length; j++) {
+        if (list.children[j].tag != TAG_LIST) continue;
+        const defnList = list.children[j] as ListNode;
+        if (defnList.children.length < 2 || defnList.children[0].tag != TAG_SYMBOL) continue;
+        if ((defnList.children[0] as SymbolNode).name != "defn") continue;
+
+        const methodName  = (defnList.children[1] as SymbolNode).name;
+        const mangledName = typeName + "__" + methodName;
+
+        // Verify this method exists in the protocol
+        if (!proto.methods.has(methodName)) {
+          env.errors.push("defimpl " + protoName + " " + typeName
+            + ": method '" + methodName + "' is not part of the protocol");
+          continue;
+        }
+        const sig = proto.methods.get(methodName)!;
+
+        // Extract param types from the defn form
+        const paramsList = defnList.children[2] as ListNode;
+        const implParams = new Array<string>();
+        for (let k = 1; k < paramsList.children.length; k += 2) {
+          implParams.push((paramsList.children[k] as SymbolNode).name);
+        }
+
+        // Extract result type annotation (children[3] if it starts with ':')
+        let implResult = "";
+        if (defnList.children.length > 3 && defnList.children[3].tag == TAG_SYMBOL) {
+          const s = (defnList.children[3] as SymbolNode).name;
+          if (s.startsWith(":")) implResult = s == ":void" ? "" : s;
+        }
+
+        // Verify signature matches protocol (substitute :*Self → :*TypeName)
+        if (implParams.length != sig.params.length) {
+          env.errors.push("defimpl " + protoName + " " + typeName + " method '" + methodName
+            + "': expected " + sig.params.length.toString() + " params, got "
+            + implParams.length.toString());
+        } else {
+          for (let k = 0; k < sig.params.length; k++) {
+            const expected = sig.params[k] == ":*Self" ? ":*" + typeName : sig.params[k];
+            if (implParams[k] != expected) {
+              env.errors.push("defimpl " + protoName + " " + typeName + " method '" + methodName
+                + "': param " + k.toString() + " expected " + expected
+                + ", got " + implParams[k]);
+            }
+          }
+        }
+        if (implResult != sig.result) {
+          env.errors.push("defimpl " + protoName + " " + typeName + " method '" + methodName
+            + "': declared return " + (implResult == "" ? ":void" : implResult)
+            + " but protocol expects " + (sig.result == "" ? ":void" : sig.result));
+        }
+
+        // Build a new defn list with the mangled name
+        const mangledDefn = new ListNode();
+        mangledDefn.children.push(defnList.children[0]); // defn
+        mangledDefn.children.push(new SymbolNode(mangledName));
+        for (let k = 2; k < defnList.children.length; k++) {
+          mangledDefn.children.push(defnList.children[k]);
+        }
+        result.push(new ExpandedForm(expandNode(mangledDefn, env)));
+
+        // Auto-register defop: (defop methodName "mangledName" (:*TypeName ...) retType)
+        // Build the concrete param types (substitute :*Self → :*TypeName)
+        const concreteParams = new Array<string>();
+        for (let k = 0; k < sig.params.length; k++) {
+          concreteParams.push(sig.params[k] == ":*Self" ? ":*" + typeName : sig.params[k]);
+        }
+        if (!env.ops.has(methodName)) env.ops.set(methodName, new Array<OpInfo>());
+        env.ops.get(methodName)!.push(
+          new OpInfo(methodName, mangledName, concreteParams, sig.result));
+
+        provided.add(methodName);
+      }
+
+      // Verify all protocol methods were provided
+      for (let j = 0; j < proto.methodNames.length; j++) {
+        const m = proto.methodNames[j];
+        if (!provided.has(m)) {
+          env.errors.push("defimpl " + protoName + " " + typeName
+            + ": missing method '" + m + "'");
+        }
+      }
       continue;
     }
 

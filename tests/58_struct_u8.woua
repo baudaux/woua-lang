@@ -1,0 +1,25 @@
+;; @test struct_u8
+;; @feature :u8 fields in deftype — 1-byte size and alignment, i32.load8_u / i32.store8;
+;;   :u8 as function parameter and return type; arithmetic on :u8 values (normalizes to i32)
+;; @expect
+;;   r=10 g=200 b=255
+;;   g_after=42
+;;   mix=52
+
+(include io)
+
+;; Struct with three u8 fields — packed into 3 bytes, total size 3
+(deftype RGB (r :u8) (g :u8) (b :u8))
+
+;; Function taking and returning :u8 — arithmetic normalizes to i32 under the hood
+(defn blend (a :u8 b :u8) :u8 (+ a b))
+
+(defn main () :void
+  (let p :*RGB (alloc 3)
+    (RGB/r! p 10)
+    (RGB/g! p 200)
+    (RGB/b! p 255)
+    (printf "r=%d g=%d b=%d\n" (RGB/r p) (RGB/g p) (RGB/b p))
+    (RGB/g! p 42)
+    (printf "g_after=%d\n" (RGB/g p))
+    (printf "mix=%d\n" (blend (RGB/r p) (RGB/g p)))))

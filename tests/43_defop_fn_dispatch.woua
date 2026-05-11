@@ -1,0 +1,42 @@
+;; @test defop_fn_dispatch
+;; @feature defop referencing a defn name instead of a WAT opcode; dispatch
+;;   selects the correct implementation based on argument types
+;; @expect
+;;   add i32: 7
+;;   add Point: 5 7
+;;   eq Point: 1
+;;   eq Point: 0
+
+(include io)
+
+(deftype Point
+  (x :i32)
+  (y :i32))
+
+;; User-defined functions to dispatch to
+(defn Point_add (a :*Point b :*Point) :*Point
+  (let r :*Point (Point (+ (Point/x a) (Point/x b))
+                        (+ (Point/y a) (Point/y b)))
+    r))
+
+(defn Point_eq (a :*Point b :*Point) :i32
+  (if (= (Point/x a) (Point/x b))
+    (= (Point/y a) (Point/y b))
+    0))
+
+;; defop with a function name — dispatches to (call $Point_add ...) or (call $Point_eq ...)
+(defop + "Point_add" (:*Point :*Point) :*Point)
+(defop = "Point_eq"  (:*Point :*Point) :i32)
+
+(defn main () :void
+  ;; Built-in + still works for :i32
+  (printf "add i32: %d\n" (+ 3 4))
+  ;; Overloaded + dispatches to Point_add
+  (let a :*Point (Point 2 3)
+    (let b :*Point (Point 3 4)
+      (let c :*Point (+ a b)
+        (printf "add Point: %d %d\n" (Point/x c) (Point/y c)))
+      ;; Overloaded = dispatches to Point_eq
+      (let d :*Point (Point 2 3)
+        (printf "eq Point: %d\n" (= a d))
+        (printf "eq Point: %d\n" (= a b))))))

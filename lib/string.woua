@@ -3,11 +3,21 @@
 ;;
 ;; :str is a first-class fat-pointer type (ptr, len) built into the compiler.
 ;; String literals produce :str values automatically (no wrapper needed).
+;; :*str is a pointer to a {base :ptr, len :i32} struct in linear memory
+;; (allocated via defstatic or heap alloc). Field accessors str/ptr and str/len
+;; transparently work on both :str locals and :*str memory pointers.
 ;;
 ;; Include:
 ;;   (include string)   ;; pulls in core.woua transitively
 
 (include core)
+
+;; ── In-memory str struct layout (:*str) ─────────────────────────────────────
+;; Defines the field offsets for a str struct in linear memory.
+;; str/ptr and str/len work on :*str pointers via i32.load / i32.load at +4.
+(deftype str
+  (ptr :ptr)
+  (len :i32))
 
 ;; ── Accessors ────────────────────────────────────────────────────────────────
 

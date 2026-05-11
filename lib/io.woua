@@ -15,7 +15,7 @@
 ;; (sizeof Iovec) is a compile-time intrinsic: resolves to the struct byte size.
 ;; (as :i32 ...) casts the Iovec pointer to the raw i32 expected by fd_write.
 (defmacro write (fd ptr len)
-  (let __write_iov :Iovec (alloc (+ (sizeof Iovec) 4))
+  (let __write_iov :*Iovec (alloc (+ (sizeof Iovec) 4))
     (Iovec/base! __write_iov ptr)
     (Iovec/len!  __write_iov len)
     (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
@@ -102,7 +102,7 @@
 ;; Strips the trailing newline. Returns a str pointing into buf,
 ;; or a zero-length str on EOF.
 (defn read-line (fd buf maxlen) :str
-  (let iov      :Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
     (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/len! iov 1)
       (let len  :i32 0

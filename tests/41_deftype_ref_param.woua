@@ -1,0 +1,41 @@
+;; @test deftype_ref_param
+;; @feature function taking a :*Point ref-type pointer as argument and returning one;
+;;   field access and mutation via Point/x, Point/y, Point/x!, Point/y! on pointers
+;; @expect
+;;   p x: 10
+;;   p y: 20
+;;   after scale x: 30
+;;   after scale y: 60
+;;   q x: 5
+;;   q y: 7
+
+(include io)
+
+(deftype Point
+  (x :i32)
+  (y :i32))
+
+;; Takes a :*Point, multiplies fields in-place, returns the same pointer
+(defn scale! (p :*Point factor :i32) :*Point
+  (Point/x! p (* (Point/x p) factor))
+  (Point/y! p (* (Point/y p) factor))
+  p)
+
+;; Takes two :*Point pointers, returns a new :*Point with summed fields
+(defn point-add (a :*Point b :*Point) :*Point
+  (let r :*Point (Point (+ (Point/x a) (Point/x b))
+                        (+ (Point/y a) (Point/y b)))
+    r))
+
+(defn main () :void
+  (let p :*Point (Point 10 20)
+    (printf "p x: %d\n" (Point/x p))
+    (printf "p y: %d\n" (Point/y p))
+    (drop (scale! p 3))
+    (printf "after scale x: %d\n" (Point/x p))
+    (printf "after scale y: %d\n" (Point/y p))
+    (let a :*Point (Point 2 3)
+      (let b :*Point (Point 3 4)
+        (let q :*Point (point-add a b)
+          (printf "q x: %d\n" (Point/x q))
+          (printf "q y: %d\n" (Point/y q)))))))

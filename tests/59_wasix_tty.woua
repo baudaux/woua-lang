@@ -1,0 +1,33 @@
+;; @test wasix_tty
+;; @feature lib/wasix.woua — tty_get reads current TTY state; Tty struct layout;
+;;   tty-set writes back; field accessors for u8 and i32 fields
+;; @runtime wasmer
+;; @expect
+;;   tty_get ok
+;;   cols>=0
+;;   rows>=0
+;;   echo in 0..1
+;;   tty_set ok
+
+(include io)
+(include wasix)
+
+(defn main () :void
+  (let t :*Tty (alloc (sizeof Tty))
+    ;; Read TTY state
+    (let ge :i32 (tty-get t)
+      (if (= ge 0)
+        (progn
+          (printf "tty_get ok\n")
+          (let cols :i32 (Tty/cols t)
+            (let rows :i32 (Tty/rows t)
+              (let echo :u8 (Tty/echo t)
+                (if (>= cols 0) (printf "cols>=0\n"))
+                (if (>= rows 0) (printf "rows>=0\n"))
+                (if (or (= echo 0) (= echo 1))
+                  (printf "echo in 0..1\n")))))
+          ;; Write the state back unchanged
+          (let se :i32 (tty-set t)
+            (if (= se 0)
+              (printf "tty_set ok\n"))))
+        (printf "tty_get failure: %d\n" ge)))))

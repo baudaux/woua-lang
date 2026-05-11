@@ -30,6 +30,7 @@ import {
   watLocalGet, watLocalSet, watLocalDecl,
   watI32Store, watI32Store8, watI32Load, watI32Load8u,
   watI64Store, watI64Load,
+  watF32Store, watF32Load, watF64Store, watF64Load,
   watIf, watBlock, watLoop, watBrIf, watBr,
   watCall, watDrop, watReturn,
 } from "./primitives";
@@ -55,6 +56,12 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
       const scalarAnnot = extractScalarReturnAnnotation(list);
       if (scalarAnnot == ":str") {
         env.funcTupleResults.set(fname, [":i32", ":i32"]);
+        env.funcResultTypes.set(fname, "");
+      } else if (scalarAnnot != null && isValueTypeAnnot(scalarAnnot, env)) {
+        // Value-type struct return → multi-value tuple of leaf field types (recursive)
+        const vtN = valueTypeName(scalarAnnot);
+        const vtFields = valueTypeLeafTypes(vtN, env);
+        env.funcTupleResults.set(fname, vtFields);
         env.funcResultTypes.set(fname, "");
       }
     }
@@ -88,6 +95,9 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
         const head = (list.children[0] as SymbolNode).name;
         if (head == "defn") {
           const name = (list.children[1] as SymbolNode).name;
+          if (env.funcBodies.has(name)) {
+            env.errors.push("defn: duplicate function name '" + name + "'");
+          }
           const wat  = codegenDefn(list, env);
           env.funcBodies.set(name, pendingComment + wat);
           env.funcNames.push(name);
@@ -104,10 +114,10 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
 // ─── WAT type helper ──────────────────────────────────────────────────────────
 
 // Convert a woua type keyword to a WAT primitive type name.
-// Known primitives: :i32 :i64 :f32 :f64 :ptr
+// Known primitives: :i32 :i64 :f32 :f64 :ptr :u8
 // User-defined struct types (e.g. :Iovec) are pointer-sized → i32.
 function watType(t: string): string {
-  if (t == ":i32" || t == ":ptr") return "i32";
+  if (t == ":i32" || t == ":ptr" || t == ":u8") return "i32";
   if (t == ":i64")                 return "i64";
   if (t == ":f32")                 return "f32";
   if (t == ":f64")                 return "f64";
@@ -115,6 +125,32 @@ function watType(t: string): string {
   // User-defined type name — struct instances are always heap pointers (i32)
   return "i32";
 }
+
+// ─── Struct type helpers ─────────────────────────────────────────────────────
+
+// True if `t` is a value-type struct annotation: `:TypeName` where TypeName is
+// registered in env.types (not a primitive, :str, :void, or :*TypeName).
+function isValueTypeAnnot(t: string, env: Env): bool {
+  if (t.length < 2) return false;
+  if (!t.startsWith(":")) return false;
+  if (t.startsWith(":*")) return false;
+  if (t == ":i32" || t == ":i64" || t == ":f32" || t == ":f64" ||
+      t == ":ptr" || t == ":u8"  || t == ":str" || t == ":void") return false;
+  if (t.startsWith(":func:")) return false;
+  return env.types.has(t.slice(1));
+}
+
+// Strip the leading `:` from a value-type annotation to get the struct TypeName.
+function valueTypeName(t: string): string { return t.slice(1); } // ":Point" → "Point"
+
+// True if `t` is a reference-type struct annotation: `:*TypeName`.
+function isRefTypeAnnot(t: string, env: Env): bool {
+  if (!t.startsWith(":*")) return false;
+  return env.types.has(t.slice(2));
+}
+
+// Strip the leading `:*` from a ref-type annotation to get the struct TypeName.
+function refTypeName(t: string): string { return t.slice(2); } // ":*Point" → "Point"
 
 // ─── First-class function helpers ────────────────────────────────────────────────────────────
 
@@ -240,6 +276,16 @@ function assembleModule(env: Env): string {
   }
   if (env.dataEntries.length > 0) out += "\n";
 
+  // User-defined mutable globals from (defvar ...)
+  // Value-type struct markers (isValueType=true) are skipped — only their leaf sub-globals are emitted.
+  for (let i = 0; i < env.globalNames.length; i++) {
+    const gname = env.globalNames[i];
+    const ginfo = env.globals.get(gname)!;
+    if (ginfo.isValueType) continue; // marker only
+    out += "  (global $" + gname + " (mut " + watType(ginfo.typeName) + ") " + ginfo.initWat + ")\n";
+  }
+  if (env.globalNames.length > 0) out += "\n";
+
   // Bump allocator: alloc(size i32) → ptr i32
   // $heap_ptr global is initialised to the end of static data (memoryOffset,
   // aligned to 4 bytes) so that allocations never overlap the data section.
@@ -296,8 +342,39 @@ function assembleModule(env: Env): string {
     }
   }
 
-  // Export _start pointing to the last defined function named "main"
-  out += '\n  (export "_start" (func $main))\n';
+  // Emit a _start wrapper that calls main then proc_exit.
+  // - main returns :i32  → pass it directly as the exit code
+  // - main returns void  → exit with 0
+  // - main returns other → drop the value, exit with 0
+  // Only emit the proc_exit call when proc_exit has been imported (not all
+  // programs include wasi_p1 / io).
+  const mainResultType = env.funcResultTypes.has("main")
+    ? env.funcResultTypes.get("main")! : "";
+  let hasProcExit = false;
+  for (let i = 0; i < env.imports.length; i++) {
+    if (env.imports[i].localName == "proc_exit") { hasProcExit = true; break; }
+  }
+  out += "\n  (; _start wrapper — calls main then proc_exit ;)\n";
+  out += "  (func $_start\n";
+  out += "    (call $main)\n";
+  if (hasProcExit) {
+    if (mainResultType == ":i32" || mainResultType == ":ptr") {
+      // use main's return value as the exit code directly
+      out += "    (call $proc_exit)\n";
+    } else {
+      if (mainResultType != "" && mainResultType != ":void") {
+        out += "    (drop)\n";
+      }
+      out += "    (call $proc_exit (i32.const 0))\n";
+    }
+  } else {
+    if (mainResultType != "" && mainResultType != ":void") {
+      out += "    (drop)\n";
+    }
+  }
+  out += "  )\n";
+
+  out += '\n  (export "_start" (func $_start))\n';
 
   out += ")\n";
   return out;
@@ -306,13 +383,13 @@ function assembleModule(env: Env): string {
 // ─── Type inference helpers ──────────────────────────────────────────────────
 
 // Normalize a woua type for overload matching.
-// :ptr and user-defined struct types are heap pointers → treated as :i32.
+// :ptr, :u8, and user-defined struct types are heap pointers / i32-backed → treated as :i32.
 function normalizeType(t: string): string {
-  if (t == ":i32" || t == ":ptr") return ":i32";
-  if (t == ":i64")                 return ":i64";
-  if (t == ":f32")                 return ":f32";
-  if (t == ":f64")                 return ":f64";
-  if (t.startsWith(":func:"))      return ":i32"; // function reference is i32
+  if (t == ":i32" || t == ":ptr" || t == ":u8") return ":i32";
+  if (t == ":i64")                               return ":i64";
+  if (t == ":f32")                               return ":f32";
+  if (t == ":f64")                               return ":f64";
+  if (t.startsWith(":func:"))                    return ":i32"; // function reference is i32
   return ":i32"; // user-defined struct type (pointer)
 }
 
@@ -325,10 +402,22 @@ function copyLocals(locals: Map<string, string>): Map<string, string> {
 }
 
 // Find the matching OpInfo overload for an operator given inferred argument types.
-// Falls back to the first registered overload when no exact match is found.
+// Exact match (without normalization) wins over normalized match so that
+// user-defined overloads for `:*T` types beat built-in primitive overloads.
 function resolveOp(name: string, argTypes: Array<string>, env: Env): OpInfo | null {
   if (!env.ops.has(name)) return null;
   const overloads = env.ops.get(name)!;
+  // Pass 1: exact type match (no normalization)
+  for (let i = 0; i < overloads.length; i++) {
+    const ov = overloads[i];
+    if (ov.params.length != argTypes.length) continue;
+    let match = true;
+    for (let j = 0; j < ov.params.length; j++) {
+      if (ov.params[j] != argTypes[j]) { match = false; break; }
+    }
+    if (match) return ov;
+  }
+  // Pass 2: normalized match (treats :*T and :ptr as :i32)
   for (let i = 0; i < overloads.length; i++) {
     const ov = overloads[i];
     if (ov.params.length != argTypes.length) continue;
@@ -352,6 +441,14 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
   if (node.tag == TAG_SYMBOL) {
     const sym = (node as SymbolNode).name;
     if (sym.startsWith("__str:")) return ":str"; // interned string literal
+    // Named defstatic — return its declared type
+    if (env.statics.has(sym)) {
+      const st = env.statics.get(sym)!;
+      if (st.typeName == ":*str" || st.typeName == ":strlit") return ":str";
+      return st.typeName; // :*Point, :i32, :bytes, etc.
+    }
+    // Mutable global variable
+    if (env.globals.has(sym)) return env.globals.get(sym)!.typeName;
     return locals.has(sym) ? locals.get(sym)! : ":i32";
   }
   if (node.tag == TAG_LIST) {
@@ -360,7 +457,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (list.children[0].tag != TAG_SYMBOL) return ":i32";
     const op = (list.children[0] as SymbolNode).name;
     if (op == "as") return (list.children[1] as SymbolNode).name;
-    if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8") return "";
+    if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8" || op == "array-set!") return "";
     if (op.includes("/") && op.endsWith("!")) return ""; // struct setter → void
     if (op == "let") {
       // ── Tuple destructuring ──────────────────────────────────────────────────
@@ -439,6 +536,11 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (op == "fn-ref") return ":i32"; // table index is i32
     if (op == "i64.load") return ":i64";
     if (op == "i64.store") return "";  // void
+    if (op == "array-ref") {
+      if (list.children.length > 1 && list.children[1].tag == TAG_SYMBOL)
+        return (list.children[1] as SymbolNode).name; // :T
+      return ":i32";
+    }
     if (env.ops.has(op)) {
       const argTypes = new Array<string>();
       for (let i = 1; i < list.children.length; i++) {
@@ -558,6 +660,9 @@ function inferDefnResultType(list: ListNode, env: Env): string {
     }
     paramLocals.set(pname, ptype);
     if (ptype == ":str") { paramLocals.set(pname + "_ptr", ":i32"); paramLocals.set(pname + "_len", ":i32"); }
+    else if (isValueTypeAnnot(ptype, env)) {
+      collectValueTypeSubLocals(pname, valueTypeName(ptype), env, paramLocals);
+    }
   }
   if (list.children.length <= bodyStart) return "";
   const letLocals = new Map<string, string>();
@@ -664,6 +769,13 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
         letLocals.set(letName, ":str"); // marker (not a real WAT local)
         letLocals.set(letName + "_ptr", ":i32");
         letLocals.set(letName + "_len", ":i32");
+      } else if (isValueTypeAnnot(typeAnnot, env)) {
+        // Value-type struct: marker + recursively expand all leaf field locals.
+        letLocals.set(letName, typeAnnot); // marker (not a real WAT local)
+        collectValueTypeSubLocals(letName, valueTypeName(typeAnnot), env, letLocals);
+      } else if (isRefTypeAnnot(typeAnnot, env)) {
+        // Ref-type struct: preserve the :*T annotation for operator dispatch.
+        letLocals.set(letName, typeAnnot);
       } else {
         letLocals.set(letName, typeAnnot);
       }
@@ -727,6 +839,14 @@ function codegenDefn(list: ListNode, env: Env): string {
   const locals = copyLocals(paramLocals);
   const letKeys = letLocals.keys();
   for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k])!);
+  // Pre-populate _ptr/_len sub-locals for :str params so the fat-pointer
+  // accessor (str/ptr / str/len) can detect them in the body codegen.
+  for (let i = 0; i < paramNames.length; i++) {
+    if (paramLocals.get(paramNames[i])! == ":str") {
+      locals.set(paramNames[i] + "_ptr", ":i32");
+      locals.set(paramNames[i] + "_len", ":i32");
+    }
+  }
 
   // Build param declarations
   // :str params expand to two WAT params: $name_ptr i32 and $name_len i32.
@@ -739,6 +859,14 @@ function codegenDefn(list: ListNode, env: Env): string {
       // Make _ptr and _len available in paramLocals for downstream type inference.
       paramLocals.set(pname + "_ptr", ":i32");
       paramLocals.set(pname + "_len", ":i32");
+    } else if (isValueTypeAnnot(ptype, env)) {
+      // Value-type struct param → one WAT param per leaf field (recursively expanded)
+      paramDecls += emitValueTypeParamDecls(pname, valueTypeName(ptype), env);
+      collectValueTypeSubLocals(pname, valueTypeName(ptype), env, paramLocals);
+    } else if (isRefTypeAnnot(ptype, env)) {
+      // Ref-type struct param → single i32 (heap pointer); preserve :*T in locals for dispatch
+      paramDecls += " (param $" + pname + " i32)";
+      paramLocals.set(pname, ptype); // overwrite :*T entry (stays :*T, not :i32)
     } else {
       paramDecls += " (param $" + pname + " " + watType(ptype) + ")";
     }
@@ -754,13 +882,20 @@ function codegenDefn(list: ListNode, env: Env): string {
   } else if (scalarAnnot != null) {
     if (scalarAnnot == ":str") {
       resultDecl = " (result i32 i32)"; // :str = fat-pointer (ptr, len)
+    } else if (isValueTypeAnnot(scalarAnnot, env)) {
+      // Value-type struct return → multi-value of leaf field types (recursive)
+      const vtN = valueTypeName(scalarAnnot);
+      const leafTypes = valueTypeLeafTypes(vtN, env);
+      let rparts = "";
+      for (let fi = 0; fi < leafTypes.length; fi++) rparts += " " + watType(leafTypes[fi]);
+      resultDecl = " (result" + rparts + ")";
     } else if (scalarAnnot != ":void") {
       resultDecl = " (result " + watType(scalarAnnot) + ")";
       // Mismatch check: warn when both declared and inferred are non-empty and differ.
       const inferred = list.children.length > bodyStart
         ? typeOf(list.children[list.children.length - 1], env, locals)
         : "";
-      if (inferred != "" && inferred != scalarAnnot) {
+      if (inferred != "" && normalizeType(inferred) != normalizeType(scalarAnnot)) {
         env.errors.push("defn " + name + ": declared return type " + scalarAnnot
           + " but body returns " + inferred);
       }
@@ -778,7 +913,8 @@ function codegenDefn(list: ListNode, env: Env): string {
   let localDecls = "";
   for (let k = 0; k < letKeys.length; k++) {
     const lt = letLocals.get(letKeys[k])!;
-    if (lt == ":str") continue; // skip the marker; _ptr and _len are emitted separately
+    if (lt == ":str") continue; // skip marker; _ptr and _len are emitted separately
+    if (isValueTypeAnnot(lt, env)) continue; // skip marker; field locals are emitted separately
     localDecls += "\n    " + watLocalDecl(letKeys[k], watType(lt));
   }
 
@@ -792,6 +928,123 @@ function codegenDefn(list: ListNode, env: Env): string {
        + localDecls
        + bodyWat
        + "\n  )";
+}
+
+// ─── Value-type struct helpers ────────────────────────────────────────────────
+
+// Return the flat list of WAT type keywords for a value-type struct (leaf scalars only).
+// Recursively expands embedded struct fields.
+// Example: valueTypeLeafTypes("Pair", env) where Pair has (a :Vec2)(b :Vec2) → [":i32",":i32",":i32",":i32"]
+function valueTypeLeafTypes(typeName: string, env: Env): Array<string> {
+  const result = new Array<string>();
+  if (!env.types.has(typeName)) return result;
+  const typeInfo = env.types.get(typeName)!;
+  for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
+    const ft = typeInfo.fields.get(typeInfo.fieldNames[fi])!.typeName;
+    if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+      const sub = valueTypeLeafTypes(ft.slice(1), env);
+      for (let k = 0; k < sub.length; k++) result.push(sub[k]);
+    } else {
+      result.push(ft);
+    }
+  }
+  return result;
+}
+
+// Return flat list of WAT local names for a value-type struct (leaf scalars only).
+// Recursively expands embedded struct fields.
+// Example: valueTypeLeafLocals("p", "Pair", env) → ["p_a_x","p_a_y","p_b_x","p_b_y"]
+function valueTypeLeafLocals(prefix: string, typeName: string, env: Env): Array<string> {
+  const result = new Array<string>();
+  if (!env.types.has(typeName)) return result;
+  const typeInfo = env.types.get(typeName)!;
+  for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
+    const fname = typeInfo.fieldNames[fi];
+    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const slot  = prefix + "_" + fname;
+    if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+      const sub = valueTypeLeafLocals(slot, ft.slice(1), env);
+      for (let k = 0; k < sub.length; k++) result.push(sub[k]);
+    } else {
+      result.push(slot);
+    }
+  }
+  return result;
+}
+
+// Add all locals (marker + leaf scalars) for a value-type struct to a locals map.
+// Sets markers for nested struct fields, leaf scalars for primitives.
+function collectValueTypeSubLocals(prefix: string, typeName: string, env: Env,
+                                    locals: Map<string, string>): void {
+  if (!env.types.has(typeName)) return;
+  const typeInfo = env.types.get(typeName)!;
+  for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
+    const fname = typeInfo.fieldNames[fi];
+    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const slot  = prefix + "_" + fname;
+    if (!locals.has(slot)) {
+      locals.set(slot, ft); // marker or scalar
+      if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+        collectValueTypeSubLocals(slot, ft.slice(1), env, locals);
+      }
+    }
+  }
+}
+
+// Emit WAT (param ...) declarations for a value-type struct parameter.
+// Recursively expands embedded struct fields to leaf scalars.
+function emitValueTypeParamDecls(prefix: string, typeName: string, env: Env): string {
+  if (!env.types.has(typeName)) return "";
+  const typeInfo = env.types.get(typeName)!;
+  let out = "";
+  for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
+    const fname = typeInfo.fieldNames[fi];
+    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const slot  = prefix + "_" + fname;
+    if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+      out += emitValueTypeParamDecls(slot, ft.slice(1), env);
+    } else {
+      out += " (param $" + slot + " " + watType(ft) + ")";
+    }
+  }
+  return out;
+}
+
+// Recursively emit WAT store instructions for one field of a ref-type struct constructor.
+// Handles embedded struct fields by recursing into their constructor args.
+function emitStructFieldStores(basePtr: string, absOffset: i32, argNode: Node,
+                                ftype: string, env: Env, locals: Map<string, string>): string {
+  const ptrExpr = absOffset == 0
+    ? basePtr
+    : "(i32.add " + basePtr + " (i32.const " + absOffset.toString() + "))";
+  if (ftype == ":u8")
+    return "\n    (i32.store8 " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+  if (ftype == ":i32" || ftype == ":ptr" || ftype.startsWith(":*"))
+    return "\n    (i32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+  if (ftype == ":f32")
+    return "\n    (f32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+  if (ftype == ":i64")
+    return "\n    (i64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+  if (ftype == ":f64")
+    return "\n    (f64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+  // Embedded struct: recurse into constructor args
+  const innerTypeName = ftype.startsWith(":") ? ftype.slice(1) : ftype;
+  if (env.types.has(innerTypeName) && argNode.tag == TAG_LIST) {
+    const argList = argNode as ListNode;
+    if (argList.children.length > 0 && argList.children[0].tag == TAG_SYMBOL &&
+        (argList.children[0] as SymbolNode).name == innerTypeName) {
+      const innerInfo = env.types.get(innerTypeName)!;
+      let out = "";
+      for (let fi = 0; fi < innerInfo.fieldNames.length; fi++) {
+        const fname = innerInfo.fieldNames[fi];
+        const innerField = innerInfo.fields.get(fname)!;
+        out += emitStructFieldStores(basePtr, absOffset + innerField.offset,
+                                     argList.children[fi + 1], innerField.typeName, env, locals);
+      }
+      return out;
+    }
+  }
+  return "\n    ;; ERROR: unsupported field type for store: " + ftype;
 }
 
 // ─── Expression codegen ───────────────────────────────────────────────────────
@@ -876,7 +1129,7 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
       : watF32Const(f32(fnode.value));
   }
 
-  // Symbol — local variable reference (or interned string literal)
+  // Symbol — local variable reference, global variable, or interned string literal
   if (node.tag == TAG_SYMBOL) {
     const sym = (node as SymbolNode).name;
     // Interned string literal __str:xxx → two compile-time constants (ptr, len)
@@ -884,9 +1137,36 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
       const info = env.statics.get(sym)!;
       return "(i32.const " + info.ptr.toString() + ") (i32.const " + info.len.toString() + ")";
     }
+    // Named defstatic — emit its address or value
+    if (env.statics.has(sym)) {
+      const info = env.statics.get(sym)!;
+      if (info.typeName == ":*str") {
+        // :*str statics have an 8-byte header; raw bytes start at hdrPtr+8
+        return "(i32.const " + (info.ptr + 8).toString() + ") (i32.const " + info.len.toString() + ")";
+      }
+      if (info.typeName == ":strlit") {
+        // inline interned literal — ptr IS the bytes directly
+        return "(i32.const " + info.ptr.toString() + ") (i32.const " + info.len.toString() + ")";
+      }
+      // Any other static (struct pointer, scalar) — push its address as i32
+      return "(i32.const " + info.ptr.toString() + ")";
+    }
+    // Mutable global variable
+    if (env.globals.has(sym)) return "(global.get $" + sym + ")";
     // :str local → push two values (ptr, len)
     if (locals.has(sym) && locals.get(sym)! == ":str") {
       return "(local.get $" + sym + "_ptr) (local.get $" + sym + "_len)";
+    }
+    // Value-type struct local → push all field values (used when passing as arg or returning)
+    if (locals.has(sym) && isValueTypeAnnot(locals.get(sym)!, env)) {
+      const vtN = valueTypeName(locals.get(sym)!);
+      const vtI = env.types.get(vtN)!;
+      let out = "";
+      for (let fi = 0; fi < vtI.fieldNames.length; fi++) {
+        if (out.length > 0) out += " ";
+        out += "(local.get $" + sym + "_" + vtI.fieldNames[fi] + ")";
+      }
+      return out;
     }
     return watLocalGet(sym);
   }
@@ -959,11 +1239,21 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     }
     const resolved = resolveOp(op, argTypes, env);
     if (resolved == null) return ";; ERROR: no overload of '" + op + "' for these types";
-    let out = "(" + resolved.watOp;
-    for (let i = 1; i < list.children.length; i++) {
-      out += " " + codegenExpr(list.children[i], env, locals);
+    // If watOp contains a dot it is a WAT instruction; otherwise it is a function name.
+    if (resolved.watOp.includes(".")) {
+      let out = "(" + resolved.watOp;
+      for (let i = 1; i < list.children.length; i++) {
+        out += " " + codegenExpr(list.children[i], env, locals);
+      }
+      return out + ")";
+    } else {
+      // Function-name dispatch: (call $fn arg0 arg1 ...)
+      const args2 = new Array<string>();
+      for (let i = 1; i < list.children.length; i++) {
+        args2.push(codegenExpr(list.children[i], env, locals));
+      }
+      return watCall(resolved.watOp, args2);
     }
-    return out + ")";
   }
 
   // ── (while cond body...) ─────────────────────────────────────────────
@@ -1113,6 +1403,75 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       }
       return bodyStr;
     }
+    // ── Value-type struct binding: (let p :Point (Point 3 4) ...) ─────────────
+    if (isValueTypeAnnot(typeAnnot, env)) {
+      const vtN = valueTypeName(typeAnnot);
+      const vtI = env.types.get(vtN)!;
+      const fnames = vtI.fieldNames;
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, typeAnnot); // marker
+      collectValueTypeSubLocals(letName, vtN, env, newLocals);
+      let bodyV = "(; let " + letName + " ;) ";
+      const valNode = list.children[valIdx];
+      // If value is a constructor call (TypeName arg0 arg1 ...), push each arg recursively
+      if (valNode.tag == TAG_LIST) {
+        const valList = valNode as ListNode;
+        if (valList.children.length > 0 && valList.children[0].tag == TAG_SYMBOL &&
+            (valList.children[0] as SymbolNode).name == vtN) {
+          for (let fi = 0; fi < fnames.length; fi++) {
+            if (fi > 0) bodyV += "\n    ";
+            bodyV += codegenExpr(valList.children[fi + 1], env, locals);
+          }
+        } else {
+          // Other expression (e.g. function returning :Point — already multi-value)
+          bodyV += codegenExpr(valNode, env, locals);
+        }
+      } else {
+        bodyV += codegenExpr(valNode, env, locals);
+      }
+      // Pop leaf field values in reverse (stack is LIFO; last leaf is on top)
+      const leafLocals = valueTypeLeafLocals(letName, vtN, env);
+      for (let li = leafLocals.length - 1; li >= 0; li--) {
+        bodyV += "\n    (local.set $" + leafLocals[li] + ")";
+      }
+      for (let i = valIdx + 1; i < list.children.length; i++) {
+        bodyV += "\n    " + codegenExpr(list.children[i], env, newLocals);
+      }
+      return bodyV;
+    }
+    // ── Ref-type struct binding: (let p :*Point (Point 3 4) ...) ──────────────
+    if (isRefTypeAnnot(typeAnnot, env)) {
+      const vtN = refTypeName(typeAnnot);
+      const vtI = env.types.get(vtN)!;
+      const fnames = vtI.fieldNames;
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, typeAnnot); // preserve :*T for operator dispatch
+      let bodyR = "(; let " + letName + " ;) ";
+      const valNode = list.children[valIdx];
+      if (valNode.tag == TAG_LIST) {
+        const valList = valNode as ListNode;
+        if (valList.children.length > 0 && valList.children[0].tag == TAG_SYMBOL &&
+            (valList.children[0] as SymbolNode).name == vtN) {
+          // Constructor call: alloc then store each field (recursively for embedded structs)
+          bodyR += "(call $alloc (i32.const " + vtI.size.toString() + "))\n    ";
+          bodyR += "(local.set $" + letName + ")";
+          for (let fi = 0; fi < fnames.length; fi++) {
+            const finfo = vtI.fields.get(fnames[fi])!;
+            bodyR += emitStructFieldStores("(local.get $" + letName + ")", finfo.offset,
+                                           valList.children[fi + 1], finfo.typeName, env, locals);
+          }
+        } else {
+          // Non-constructor: treat result as already a pointer
+          bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals));
+        }
+      } else {
+        bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals));
+      }
+      for (let i = valIdx + 1; i < list.children.length; i++) {
+        bodyR += "\n    " + codegenExpr(list.children[i], env, newLocals);
+      }
+      return bodyR;
+    }
     const val       = codegenExpr(list.children[valIdx], env, locals);
     const newLocalsS = copyLocals(locals);
     newLocalsS.set(letName, typeAnnot);
@@ -1146,9 +1505,60 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
 
   // ── (set! name val) ────────────────────────────────────────────────────────
   if (op == "set!") {
-    const name = (list.children[1] as SymbolNode).name;
-    const val  = codegenExpr(list.children[2], env, locals);
-    return watLocalSet(name, val);
+    const name  = (list.children[1] as SymbolNode).name;
+    if (env.globals.has(name)) {
+      const ginfo = env.globals.get(name)!;
+      // Value-type struct global: fields live as separate sub-globals
+      if (ginfo.isValueType) {
+        const sName = ginfo.typeName.slice(1); // ":Point" → "Point"
+        const vtI   = env.types.get(sName)!;
+        const rhsNode = list.children[2];
+        if (rhsNode.tag == TAG_LIST) {
+          const rhsList = rhsNode as ListNode;
+          if (rhsList.children.length > 0 && rhsList.children[0].tag == TAG_SYMBOL &&
+              (rhsList.children[0] as SymbolNode).name == sName) {
+            // Constructor: set each sub-global directly (no heap allocation)
+            let out = "";
+            const fnames = vtI.fieldNames;
+            for (let fi = 0; fi < fnames.length; fi++) {
+              if (out.length > 0) out += "\n    ";
+              const val = codegenExpr(rhsList.children[fi + 1], env, locals);
+              out += "(global.set $" + name + "_" + fnames[fi] + " " + val + ")";
+            }
+            return out;
+          }
+        }
+        return ";; ERROR: cannot assign non-constructor expression to value-type global '" + name + "'";
+      }
+      // Ref-type struct global: (set! g (TypeName f1 f2 ...)) → alloc + field stores
+      const sName = ginfo.typeName.startsWith(":*") ? ginfo.typeName.slice(2) : ginfo.typeName.slice(1);
+      if (env.types.has(sName)) {
+        const vtI = env.types.get(sName)!;
+        const rhsNode = list.children[2];
+        if (rhsNode.tag == TAG_LIST) {
+          const rhsList = rhsNode as ListNode;
+          if (rhsList.children.length > 0 && rhsList.children[0].tag == TAG_SYMBOL &&
+              (rhsList.children[0] as SymbolNode).name == sName) {
+            // Constructor: alloc, store pointer in global, store each field
+            let out = "(call $alloc (i32.const " + vtI.size.toString() + "))\n    ";
+            out += "(global.set $" + name + ")";
+            const fnames = vtI.fieldNames;
+            for (let fi = 0; fi < fnames.length; fi++) {
+              const finfo = vtI.fields.get(fnames[fi])!;
+              out += emitStructFieldStores(
+                "(global.get $" + name + ")", finfo.offset,
+                rhsList.children[fi + 1], finfo.typeName, env, locals);
+            }
+            return out;
+          }
+        }
+        // Non-constructor RHS: treat as already a pointer (i32)
+        return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals) + ")";
+      }
+      // Primitive global
+      return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals) + ")";
+    }
+    return watLocalSet(name, codegenExpr(list.children[2], env, locals));
   }
 
 
@@ -1182,6 +1592,40 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     return watI64Store(codegenExpr(list.children[1], env, locals),
                       codegenExpr(list.children[2], env, locals));
   }
+
+  // ── (array-ref :T data-ptr idx) — typed element load ─────────────────────
+  // data-ptr is the raw element buffer pointer (not the Array header pointer).
+  // Emits: T.load(data-ptr + idx * sizeof(T))
+  if (op == "array-ref") {
+    const etype    = (list.children[1] as SymbolNode).name;
+    const dataPtr  = codegenExpr(list.children[2], env, locals);
+    const idx      = codegenExpr(list.children[3], env, locals);
+    const elemSize = env.sizeOf(etype);
+    const addrExpr = elemSize <= 1
+      ? "(i32.add " + dataPtr + " " + idx + ")"
+      : "(i32.add " + dataPtr + " (i32.mul " + idx + " (i32.const " + elemSize.toString() + ")))";
+    if (etype == ":i64") return watI64Load(addrExpr);
+    if (etype == ":f32") return watF32Load(addrExpr);
+    if (etype == ":f64") return watF64Load(addrExpr);
+    return watI32Load(addrExpr); // :i32, :ptr, :*T, etc.
+  }
+
+  // ── (array-set! :T data-ptr idx val) — typed element store ───────────────
+  if (op == "array-set!") {
+    const etype    = (list.children[1] as SymbolNode).name;
+    const dataPtr  = codegenExpr(list.children[2], env, locals);
+    const idx      = codegenExpr(list.children[3], env, locals);
+    const val2     = codegenExpr(list.children[4], env, locals);
+    const elemSize = env.sizeOf(etype);
+    const addrExpr = elemSize <= 1
+      ? "(i32.add " + dataPtr + " " + idx + ")"
+      : "(i32.add " + dataPtr + " (i32.mul " + idx + " (i32.const " + elemSize.toString() + ")))";
+    if (etype == ":i64") return watI64Store(addrExpr, val2);
+    if (etype == ":f32") return watF32Store(addrExpr, val2);
+    if (etype == ":f64") return watF64Store(addrExpr, val2);
+    return watI32Store(addrExpr, val2);
+  }
+
   // ── (drop expr) — discard a value (void) ──────────────────────────────────
   if (op == "drop") {
     return watDrop(codegenExpr(list.children[1], env, locals));
@@ -1199,14 +1643,69 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return "(local.get $" + typeName + "_" + field + ")";
     }
     // :str fat-pointer accessor — access $varname_ptr or $varname_len directly.
+    // Only applies when the argument is a true :str fat-pointer local (has _ptr sub-local).
+    // :*str pointers use the hardcoded {ptr@0, len@4} layout below.
     if (typeName == "str") {
       const varNode = list.children[1];
       const varName = varNode.tag == TAG_SYMBOL ? (varNode as SymbolNode).name : "";
+      if (locals.has(varName + "_ptr")) {
+        if (isSetter) {
+          const val = codegenExpr(list.children[2], env, locals);
+          return "(local.set $" + varName + "_" + field + " " + val + ")";
+        }
+        return "(local.get $" + varName + "_" + field + ")";
+      }
+      // Named :*str static used directly — fold to compile-time constants.
+      // The header layout is {ptr@0 = bytesAddr, len@4 = length}.
+      if (env.statics.has(varName) && env.statics.get(varName)!.typeName == ":*str") {
+        const info = env.statics.get(varName)!;
+        if (field == "ptr") return "(i32.const " + (info.ptr + 8).toString() + ")";
+        if (field == "len") return "(i32.const " + info.len.toString() + ")";
+      }
+      // :*str pointer in a local — hardcoded layout {ptr@0, len@4}; no deftype required.
+      const ptrExpr = codegenExpr(list.children[1], env, locals);
       if (isSetter) {
         const val = codegenExpr(list.children[2], env, locals);
-        return "(local.set $" + varName + "_" + field + " " + val + ")";
+        if (field == "ptr") return "(i32.store " + ptrExpr + " " + val + ")";
+        if (field == "len") return "(i32.store (i32.add " + ptrExpr + " (i32.const 4)) " + val + ")";
       }
-      return "(local.get $" + varName + "_" + field + ")";
+      if (field == "ptr") return "(i32.load " + ptrExpr + ")";
+      if (field == "len") return "(i32.load (i32.add " + ptrExpr + " (i32.const 4)))";
+    }
+    // Value-type struct field accessor: (Point/x p) where p has type :Point → local.get/set
+    if (list.children.length > 1 && list.children[1].tag == TAG_SYMBOL) {
+      const varName = (list.children[1] as SymbolNode).name;
+      if (locals.has(varName) && locals.get(varName)! == ":" + typeName) {
+        if (env.types.has(typeName) && env.types.get(typeName)!.fields.has(field)) {
+          const ft = env.types.get(typeName)!.fields.get(field)!.typeName;
+          // Embedded struct field → push all its leaf sub-locals (multi-value)
+          if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
+            if (isSetter) return ";; ERROR: cannot set embedded struct field directly; use sub-field setters";
+            const leaves = valueTypeLeafLocals(varName + "_" + field, ft.slice(1), env);
+            let out = "";
+            for (let k = 0; k < leaves.length; k++) {
+              if (out.length > 0) out += " ";
+              out += "(local.get $" + leaves[k] + ")";
+            }
+            return out;
+          }
+        }
+        // Scalar or pointer field
+        if (isSetter) {
+          const val = codegenExpr(list.children[2], env, locals);
+          return "(local.set $" + varName + "_" + field + " " + val + ")";
+        }
+        return "(local.get $" + varName + "_" + field + ")";
+      }
+      // Value-type struct *global* field accessor → global.get/set
+      if (env.globals.has(varName) && env.globals.get(varName)!.isValueType &&
+          env.globals.get(varName)!.typeName == ":" + typeName) {
+        if (isSetter) {
+          const val = codegenExpr(list.children[2], env, locals);
+          return "(global.set $" + varName + "_" + field + " " + val + ")";
+        }
+        return "(global.get $" + varName + "_" + field + ")";
+      }
     }
     const ptr      = codegenExpr(list.children[1], env, locals);
     if (isSetter) {
@@ -1230,6 +1729,18 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       out += " " + codegenExpr(list.children[i], env, locals);
     }
     out += " " + watLocalGet(op) + ")";
+    return out;
+  }
+
+  // ── Value-type struct constructor: (Point 10 20) — push field values inline ─
+  // Used when returned from a function, passed as an argument, or used in any
+  // non-let context.  The let branches handle `:Point` / `:*Point` specially.
+  if (env.types.has(op)) {
+    let out = "";
+    for (let i = 1; i < list.children.length; i++) {
+      if (i > 1) out += "\n    ";
+      out += codegenExpr(list.children[i], env, locals);
+    }
     return out;
   }
 

@@ -1,0 +1,39 @@
+;; @test arrays_struct_inline
+;; @feature array-ptr returns :*T pointing into the buffer (inline/flat storage);
+;;   array-slot allocates the next slot; array-pop-slot frees it
+;; @expect
+;;   len=2 cap=4
+;;   p0: 10 20
+;;   p1: 30 40
+;;   after update p0: 99 20
+;;   after pop len=1
+
+(include io)
+(include array)
+
+(deftype Point (x :i32) (y :i32))
+
+(defn main () :void
+  ;; array-new :Point 4 — buffer is 4 * sizeof(Point) = 32 bytes inline
+  (let a :*Array (array-new :Point 4)
+    ;; Push inline: get next slot pointer, write fields, len increments
+    (let s0 :*Point (array-slot :Point a)
+      (Point/x! s0 10)
+      (Point/y! s0 20))
+    (let s1 :*Point (array-slot :Point a)
+      (Point/x! s1 30)
+      (Point/y! s1 40))
+
+    (printf "len=%d cap=%d\n" (array-len a) (array-cap a))
+
+    ;; Read via array-ptr
+    (let p0 :*Point (array-ptr :Point a 0)
+      (let p1 :*Point (array-ptr :Point a 1)
+        (printf "p0: %d %d\n" (Point/x p0) (Point/y p0))
+        (printf "p1: %d %d\n" (Point/x p1) (Point/y p1))
+        ;; In-place update via array-ptr
+        (Point/x! p0 99)
+        (printf "after update p0: %d %d\n" (Point/x p0) (Point/y p0))
+        ;; Pop the last slot
+        (drop (array-pop-slot :Point a))
+        (printf "after pop len=%d\n" (array-len a))))))

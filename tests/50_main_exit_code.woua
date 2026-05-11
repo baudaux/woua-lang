@@ -1,0 +1,8 @@
+;; @test main_exit_code
+;; @feature main returning :i32 uses the value as the WASI exit code
+;; @expect-exit 42
+
+(include io)
+
+(defn main () :i32
+  42)

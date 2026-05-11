@@ -9,11 +9,11 @@
 
 (deftype Iov (base :ptr) (len :i32))
 
-(defstatic msg "defimport ok\n")
+(defstatic msg :*str "defimport ok\n")
 
 (defn main ()
-  (drop (let iov :Iov (alloc (+ (sizeof Iov) 4))
-    (Iov/base! iov (static-ptr msg))
-    (Iov/len!  iov (static-len msg))
+  (drop (let iov :*Iov (alloc (+ (sizeof Iov) 4))
+    (Iov/base! iov (str/ptr msg))
+    (Iov/len!  iov (str/len msg))
     (fd_write 1 (as :i32 iov) 1 (+ (as :i32 iov) (sizeof Iov)))))
   (proc_exit 0))

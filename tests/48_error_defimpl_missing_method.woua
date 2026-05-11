@@ -1,0 +1,15 @@
+;; @test error_defimpl_missing_method
+;; @feature defimpl missing a required protocol method triggers a compile error
+;; @expect-error
+
+(deftype Circle (radius :i32))
+
+(defprotocol Shape
+  (area      (self :*Self) :i32)
+  (perimeter (self :*Self) :i32))
+
+;; Missing perimeter — should error
+(defimpl Shape Circle
+  (defn area (c :*Circle) :i32 42))
+
+(defn main () :void)

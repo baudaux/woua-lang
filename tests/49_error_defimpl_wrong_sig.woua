@@ -1,0 +1,14 @@
+;; @test error_defimpl_wrong_sig
+;; @feature defimpl with wrong return type triggers a compile error
+;; @expect-error
+
+(deftype Circle (radius :i32))
+
+(defprotocol Shape
+  (area (self :*Self) :i32))
+
+;; Wrong return type — protocol says :i32 but impl declares :i64
+(defimpl Shape Circle
+  (defn area (c :*Circle) :i64 42i64))
+
+(defn main () :void)

@@ -1,0 +1,23 @@
+;; @test defstatic_str
+;; @feature (defstatic name :*str "text") allocates a {base,len} header + bytes in
+;;   linear memory; (static-ref name) returns the :*str header address;
+;;   str/ptr and str/len access fields on the header; static-ptr/static-len also work.
+;; @expect
+;;   hello world
+;;   len: 11
+;;   ptr ok
+
+(include io)
+
+(defstatic greeting :*str "hello world")
+
+(defn main () :void
+  ;; idiomatic: bind the :*str header and use str/ptr, str/len
+  (let p :*str (static-ref greeting)
+    (write 1 (str/ptr p) (str/len p))
+    (write 1 (static-ptr "\n") 1)
+    (printf "len: %d\n" (str/len p))
+    ;; verify: str/ptr matches the raw bytes address
+    (if (= (str/ptr p) (static-ptr greeting))
+      (write 1 (static-ptr "ptr ok\n") 7)
+      (write 1 (static-ptr "ptr FAIL\n") 9))))

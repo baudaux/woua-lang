@@ -1,0 +1,8 @@
+;; @test error_duplicate_defn
+;; @feature duplicate defn name triggers a compile error
+;; @expect-error
+
+(defn foo () :i32 1)
+(defn foo () :i32 2)
+
+(defn main () :void)

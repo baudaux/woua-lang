@@ -1,0 +1,57 @@
+;; @test defvar_types
+;; @feature (defvar name :Type init) works for :i32, :i64, :f32, :f64,
+;;   value-type structs (fields as separate WAT globals, no heap),
+;;   and ref-type structs :*T (single i32 heap pointer global)
+;; @expect
+;;   x10=15
+;;   big=1000000
+;;   scale100=314
+;;   px=10
+;;   py=20
+;;   py_after=99
+;;   rpx=5
+;;   rpy=7
+;;   rpy_after=42
+
+(include io)
+
+;; :f32 global with integer 0 init (type reconciliation: must produce f32.const, not i32.const)
+(defvar x :f32 0)
+
+;; :i64 global
+(defvar big :i64 0)
+
+;; :f64 global with float literal (f64 suffix required)
+(defvar scale :f64 3.14f64)
+
+;; Value-type struct global: fields px/py stored as separate WAT globals, all zero-initialized
+(deftype Point (px :i32) (py :i32))
+(defvar current-point :Point)
+
+;; Ref-type struct global: single i32 heap pointer, zero-initialized (null until assigned)
+(defvar ref-point :*Point)
+
+(defn main () :void
+  (set! x 1.5)
+  (printf "x10=%d\n" (as :i32 (* x 10.0)))
+
+  (set! big 1000000i64)
+  (printf "big=%ld\n" big)
+
+  (printf "scale100=%d\n" (as :i32 (* scale 100.0f64)))
+
+  ;; Set fields directly — no heap allocation
+  (set! current-point (Point 10 20))
+  (printf "px=%d\n" (Point/px current-point))
+  (printf "py=%d\n" (Point/py current-point))
+
+  ;; Mutate one field
+  (Point/py! current-point 99)
+  (printf "py_after=%d\n" (Point/py current-point))
+
+  ;; Ref-type :*Point global: allocates on heap, stores pointer in ref-point
+  (set! ref-point (Point 5 7))
+  (printf "rpx=%d\n" (Point/px ref-point))
+  (printf "rpy=%d\n" (Point/py ref-point))
+  (Point/py! ref-point 42)
+  (printf "rpy_after=%d\n" (Point/py ref-point)))

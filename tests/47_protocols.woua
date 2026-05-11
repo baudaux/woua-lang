@@ -1,0 +1,41 @@
+;; @test protocols
+;; @feature defprotocol declares a named set of required methods;
+;;   defimpl provides implementations for a concrete type, auto-registers
+;;   defop entries, and verifies all methods are present with correct signatures
+;; @expect
+;;   circle area: 78
+;;   circle perimeter: 31
+;;   rect area: 12
+;;   rect perimeter: 14
+
+(include io)
+
+(deftype Circle (radius :i32))
+(deftype Rect   (width :i32) (height :i32))
+
+;; Declare the protocol: every Shape must implement area and perimeter
+(defprotocol Shape
+  (area      (self :*Self) :i32)
+  (perimeter (self :*Self) :i32))
+
+;; Implement Shape for Circle
+(defimpl Shape Circle
+  (defn area (c :*Circle) :i32
+    (/ (* 314 (* (Circle/radius c) (Circle/radius c))) 100))
+  (defn perimeter (c :*Circle) :i32
+    (/ (* 628 (Circle/radius c)) 100)))
+
+;; Implement Shape for Rect
+(defimpl Shape Rect
+  (defn area (r :*Rect) :i32
+    (* (Rect/width r) (Rect/height r)))
+  (defn perimeter (r :*Rect) :i32
+    (* 2 (+ (Rect/width r) (Rect/height r)))))
+
+(defn main () :void
+  (let c :*Circle (Circle 5)
+    (printf "circle area: %d\n"      (area c))
+    (printf "circle perimeter: %d\n" (perimeter c)))
+  (let r :*Rect (Rect 3 4)
+    (printf "rect area: %d\n"        (area r))
+    (printf "rect perimeter: %d\n"   (perimeter r))))

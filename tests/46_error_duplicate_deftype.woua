@@ -1,0 +1,8 @@
+;; @test error_duplicate_deftype
+;; @feature duplicate deftype name triggers a compile error
+;; @expect-error
+
+(deftype Point (x :i32) (y :i32))
+(deftype Point (x :i32) (y :i32))
+
+(defn main () :void)

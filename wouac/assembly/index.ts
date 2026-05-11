@@ -422,6 +422,15 @@ export function _start(): void {
 
   const wat = generateModule(expanded, env);
 
+  // Report any errors produced during codegen (e.g. duplicate defn names)
+  if (env.errors.length > 0) {
+    for (let i = 0; i < env.errors.length; i++) {
+      Console.error("wouac: " + env.errors[i] + "\n");
+    }
+    Process.exit(1);
+    return;
+  }
+
   // -- Write WAT to stdout or file --------------------------------------------
   if (outputArg != "") {
     if (!writePathString(outputArg, wat)) {

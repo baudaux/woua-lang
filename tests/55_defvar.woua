@@ -1,0 +1,30 @@
+;; @test defvar
+;; @feature (defvar name :Type init) declares a mutable global variable;
+;;   reading the name emits global.get; (set! name val) emits global.set
+;; @expect
+;;   counter=0
+;;   counter=1
+;;   counter=2
+;;   flag=1
+;;   flag=0
+
+(include io)
+
+;; Simple counter global
+(defvar counter :i32 0)
+
+;; Boolean-style flag
+(defvar flag :i32 0)
+
+(defn main () :void
+  (printf "counter=%d\n" counter)
+  (set! counter (+ counter 1))
+  (printf "counter=%d\n" counter)
+  (set! counter (+ counter 1))
+  (printf "counter=%d\n" counter)
+
+  (set! flag 1)
+  (printf "flag=%d\n" flag)
+  (set! flag 0)
+  (printf "flag=%d\n" flag)
+)

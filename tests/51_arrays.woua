@@ -1,0 +1,29 @@
+;; @test arrays
+;; @feature Array type with ptr/len/cap; array-new, array-push, array-pop, array-get,
+;;   array-set, array-len, array-cap, array-full?
+;; @expect
+;;   len=3 cap=5
+;;   arr[0]=10
+;;   arr[1]=20
+;;   arr[2]=30
+;;   after set arr[1]=99
+;;   full=0
+;;   popped=30 len=2
+
+(include io)
+(include array)
+
+(defn main () :void
+  (let a :*Array (array-new :i32 5)
+    (array-push :i32 a 10)
+    (array-push :i32 a 20)
+    (array-push :i32 a 30)
+    (printf "len=%d cap=%d\n" (array-len a) (array-cap a))
+    (printf "arr[0]=%d\n" (array-get :i32 a 0))
+    (printf "arr[1]=%d\n" (array-get :i32 a 1))
+    (printf "arr[2]=%d\n" (array-get :i32 a 2))
+    (array-set :i32 a 1 99)
+    (printf "after set arr[1]=%d\n" (array-get :i32 a 1))
+    (printf "full=%d\n" (array-full? a))
+    (let v :i32 (array-pop :i32 a)
+      (printf "popped=%d len=%d\n" v (array-len a)))))

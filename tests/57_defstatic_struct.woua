@@ -1,0 +1,36 @@
+;; @test defstatic_struct
+;; @feature (defstatic name :*TypeName (TypeName f1 f2 ...)) reserves sizeof(TypeName) bytes
+;;   in static linear memory at compile time and encodes the field values as a (data ...) segment;
+;;   the struct is fully initialised before main runs, no runtime stores needed;
+;;   nested struct constructors are recursively encoded
+;; @expect
+;;   px=3
+;;   py=7
+;;   px_after=99
+;;   rx=5
+;;   ry=6
+;;   rw=100
+;;   rh=200
+
+(include io)
+
+(deftype Point (px :i32) (py :i32))
+(deftype Vec2  (x  :i32) (y  :i32))
+(deftype Rect  (pos :Vec2) (w :i32) (h :i32))
+
+;; Flat struct: reserves 8 bytes, baked in at compile time
+(defstatic origin :*Point (Point 3 7))
+
+;; Nested struct: pos embedded as Vec2, recursively encoded into data segment
+(defstatic bounds :*Rect (Rect (Vec2 5 6) 100 200))
+
+(defn main () :void
+  (printf "px=%d\n" (Point/px origin))
+  (printf "py=%d\n" (Point/py origin))
+  (Point/px! origin 99)
+  (printf "px_after=%d\n" (Point/px origin))
+
+  (printf "rx=%d\n" (Vec2/x  (Rect/pos bounds)))
+  (printf "ry=%d\n" (Vec2/y  (Rect/pos bounds)))
+  (printf "rw=%d\n" (Rect/w  bounds))
+  (printf "rh=%d\n" (Rect/h  bounds)))

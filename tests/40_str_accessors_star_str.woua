@@ -1,0 +1,14 @@
+;; @test str_accessors_star_str
+;; @feature str/ptr and str/len work directly on a :*str static (no static-ref needed)
+;; @expect
+;;   hello world
+;;   len: 11
+
+(include io)
+
+(defstatic greeting :*str "hello world")
+
+(defn main () :void
+  (write 1 (str/ptr greeting) (str/len greeting))
+  (write 1 (static-ptr "\n") 1)
+  (printf "len: %d\n" (str/len greeting)))

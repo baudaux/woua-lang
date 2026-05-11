@@ -1,0 +1,109 @@
+;; Array — heap-allocated dynamic array: { ptr :i32, len :i32, cap :i32 }
+;; The element buffer is a separate allocation pointed to by `ptr`.
+;;
+;; Usage:
+;;   (array-new :i32 16)            → :*Array with capacity for 16 i32 elements
+;;   (array-push :i32 arr val)      → void  (no bounds check; caller ensures room)
+;;   (array-get  :i32 arr idx)      → :i32
+;;   (array-set  :i32 arr idx val)  → void
+;;   (array-len  arr)               → :i32  (current element count)
+;;   (array-cap  arr)               → :i32  (allocated capacity)
+;;   (array-full? arr)              → :i32  (1 if len == cap)
+;;
+;; The type argument T must be one of: :i32, :i64, :f32, :f64, :ptr, or any
+;; reference-type pointer (:*Foo).  It selects the right WAT load/store
+;; instruction and the element stride (sizeof T).  No generics needed.
+
+(include io)
+
+(deftype Array
+  (ptr :i32)
+  (len :i32)
+  (cap :i32))
+
+;; Allocate a new array with the given element type T and initial capacity cap.
+;; Allocates the element buffer first, then the Array header struct.
+(defmacro array-new (T cap)
+  (let __arr :*Array (Array (alloc (* cap (sizeof T))) 0 cap)
+    __arr))
+
+;; Current number of stored elements.
+(defmacro array-len (arr) (Array/len arr))
+
+;; Allocated capacity — maximum elements before the buffer is full.
+(defmacro array-cap (arr) (Array/cap arr))
+
+;; 1 when the array is full (len == cap), 0 otherwise.
+(defmacro array-full? (arr) (= (Array/len arr) (Array/cap arr)))
+
+;; Get the element at index idx.  No bounds check.
+(defmacro array-get (T arr idx)
+  (array-ref T (Array/ptr arr) idx))
+
+;; Set the element at index idx.  No bounds check.
+(defmacro array-set (T arr idx val)
+  (array-set! T (Array/ptr arr) idx val))
+
+;; Append val to the end of the array.
+;; No bounds check — caller must ensure (not (array-full? arr)).
+(defmacro array-push (T arr val)
+  (progn
+    (array-set! T (Array/ptr arr) (Array/len arr) val)
+    (Array/len! arr (+ (Array/len arr) 1))))
+
+;; Checked push — aborts with an error message if the array is full.
+(defmacro array-push! (T arr val)
+  (progn
+    (assert (not (array-full? arr)) "array-push!: array is full")
+    (array-push T arr val)))
+
+;; Remove and return the last scalar element.  No bounds check.
+(defmacro array-pop (T arr)
+  (let __i :i32 (- (Array/len arr) 1)
+    (Array/len! arr __i)
+    (array-ref T (Array/ptr arr) __i)))
+
+;; Checked pop — aborts if the array is empty.
+(defmacro array-pop! (T arr)
+  (progn
+    (assert (> (Array/len arr) 0) "array-pop!: array is empty")
+    (array-pop T arr)))
+
+;; Return a raw pointer to the element storage slot at index idx.
+;; For scalar types: same as (array-get :T arr idx) but returns the address.
+;; For struct types (:T where T is a deftype): returns a :*T pointing directly
+;; into the buffer — no allocation.  Use struct accessors on the result:
+;;   (let p :*Point (array-ptr :Point a 0)
+;;     (Point/x! p 10) (Point/y! p 20))
+;; To push an inline struct slot (writes nothing, just advances len):
+;;   (let slot :*Point (array-slot :Point a)
+;;     (Point/x! slot 1) (Point/y! slot 2))
+(defmacro array-ptr (T arr idx)
+  (+ (Array/ptr arr) (* idx (sizeof T))))
+
+;; Allocate the next empty slot for an inline struct, advance len, return :*T.
+;; No bounds check.
+(defmacro array-slot (T arr)
+  (let __idx :i32 (Array/len arr)
+    (Array/len! arr (+ __idx 1))
+    (+ (Array/ptr arr) (* __idx (sizeof T)))))
+
+;; Checked slot — aborts if the array is full.
+(defmacro array-slot! (T arr)
+  (progn
+    (assert (not (array-full? arr)) "array-slot!: array is full")
+    (array-slot T arr)))
+
+;; Reverse of array-slot: decrement len, return :*T pointing to the freed slot.
+;; The slot data is still readable until the next array-slot overwrites it.
+;; No bounds check.
+(defmacro array-pop-slot (T arr)
+  (let __i :i32 (- (Array/len arr) 1)
+    (Array/len! arr __i)
+    (+ (Array/ptr arr) (* __i (sizeof T)))))
+
+;; Checked pop-slot — aborts if the array is empty.
+(defmacro array-pop-slot! (T arr)
+  (progn
+    (assert (> (Array/len arr) 0) "array-pop-slot!: array is empty")
+    (array-pop-slot T arr)))

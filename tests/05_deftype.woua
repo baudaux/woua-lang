@@ -1,5 +1,5 @@
 ;; @test deftype
-;; @feature declare a struct type and access fields via generated accessor macros
+;; @feature declare a struct type; :*Point allocates on heap via constructor
 ;; @expect
 ;;   x: 10
 ;;   y: 20
@@ -10,9 +10,7 @@
   (x :i32)
   (y :i32))
 
-(defn main ()
-  (let p :Point (alloc (sizeof Point))
-    (Point/x! p 10)
-    (Point/y! p 20)
+(defn main () :void
+  (let p :*Point (Point 10 20)
     (printf "x: %d\n" (Point/x p))
     (printf "y: %d\n" (Point/y p))))

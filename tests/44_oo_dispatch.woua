@@ -1,0 +1,36 @@
+;; @test oo_dispatch
+;; @feature object-oriented dispatch — static method dispatch via defop calling defn;
+;;   the same method name (area) resolves to a different defn at compile time
+;;   based on the static type of the argument — no vtable, no heap overhead;
+;;   CLOS-style generic functions without any runtime cost
+;; @expect
+;;   circle area: 78
+;;   rect area: 12
+
+(include io)
+
+(deftype Circle
+  (radius :i32))
+
+(deftype Rect
+  (width  :i32)
+  (height :i32))
+
+;; Type-specific implementations
+(defn circle-area (c :*Circle) :i32
+  ;; Approximate pi*r^2 using 314 * r * r / 100
+  (/ (* 314 (* (Circle/radius c) (Circle/radius c))) 100))
+
+(defn rect-area (r :*Rect) :i32
+  (* (Rect/width r) (Rect/height r)))
+
+;; Generic 'area' method — same name dispatches to the correct implementation
+;; based on argument type at compile time; no vtable or runtime overhead
+(defop area "circle-area" (:*Circle) :i32)
+(defop area "rect-area"   (:*Rect)   :i32)
+
+(defn main () :void
+  (let c :*Circle (Circle 5)
+    (printf "circle area: %d\n" (area c)))
+  (let r :*Rect (Rect 3 4)
+    (printf "rect area: %d\n" (area r))))

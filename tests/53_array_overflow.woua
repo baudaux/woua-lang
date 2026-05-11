@@ -1,0 +1,13 @@
+;; @test array_overflow
+;; @feature array-push! aborts with exit code 1 when the array is full
+;; @expect-exit 1
+;; @expect
+;;   assertion failed: array-push!: array is full
+
+(include array)
+
+(defn main () :void
+  (let a :*Array (array-new :i32 2)
+    (array-push! :i32 a 10)
+    (array-push! :i32 a 20)
+    (array-push! :i32 a 30)))  ;; 3rd push on cap=2 array → abort

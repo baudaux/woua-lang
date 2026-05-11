@@ -20,7 +20,11 @@
 - [ ] #10 `%x` / `%X` in `printf` — hexadecimal output specifier in `lib/io.woua`
 - [x] #11 `printf` generated functions
 - [ ] #12 Tail call optimization — emit `return_call` / `return_call_indirect` WAT instructions for self-tail-calls and mutual tail-calls; mandatory for recursive woua code to be safe at depth (the current `printf-impl` is already a recursive macro, but user `defn` functions risk stack overflow without TCO)
-- [ ] #13 Operator overloading for user-defined types — allow `defop` to reference a `defn` name instead of a WAT opcode; e.g. `(defop + "Point_add" (:Point :Point) :Point)` dispatches to `(call $Point_add ...)`; `resolveOp` already handles multiple overloads per operator, only the codegen emit path needs extending
+- [x] #13 Operator overloading for user-defined types — allow `defop` to reference a `defn` name instead of a WAT opcode; e.g. `(defop + "Point_add" (:Point :Point) :Point)` dispatches to `(call $Point_add ...)`; `resolveOp` already handles multiple overloads per operator, only the codegen emit path needs extending
+- [x] #59 `lib/wasix.woua` — WASIX extension library with at least two helpers:
+  - `tty_get` — wraps the `wasix:tty/get` syscall to retrieve the current TTY settings (rows, cols, stdin/stdout isatty flags) into a struct
+  - `tty_set` — wraps `wasix:tty/set` to apply new TTY settings (e.g. disable echo, set raw mode)
+  - `defimport` both from the `"wasix_32v1"` module; define a `(deftype TtyState ...)` struct capturing the relevant fields; expose `(tty-get buf)` and `(tty-set buf)` macros in the library
 
 ## Medium priority
 
@@ -36,13 +40,14 @@
 - [ ] #19 `min` / `max` — macros in `lib/core.woua` using `if` + a temp local to avoid double evaluation
 - [ ] #20 `mod` / `rem` operators — `i32.rem_s` / `i32.rem_u` missing from `lib/core.woua`
 - [ ] #21 Unsigned arithmetic — `div_u`, `rem_u`, `lt_u`, `shr_u` variants in `lib/core.woua` for treating i32/i64 as unsigned
-- [ ] #22 `defconst` — named compile-time integer constant: `(defconst MAX_LEN 256)`
-- [ ] #23 Static strings as `str` structs — store `(ptr, len)` header in the data section alongside the raw bytes; add `(static-ref msg)` intrinsic returning the header pointer directly as `:str` without heap allocation; `(static-ptr msg)` / `(static-len msg)` kept for backward compatibility
+- [x] #22 `defconst` — named compile-time integer constant: `(defconst MAX_LEN 256)`
+- [x] #23 Static strings as `str` structs — `(defstatic name :str "text")` stores an 8-byte `{base:i32, len:i32}` header followed by the raw bytes in the data section; `(static-ref name)` returns the header address (a `:str` pointer in linear memory); `(static-ptr name)` / `(static-len name)` kept for backward compatibility
 - [ ] #24 Bitwise operators in `lib/core.woua`: `band`, `bor`, `bxor`, `bnot`, `shl`, `shr`
-- [ ] #25 Arrays — `Array` type as a `(ptr, len)` struct with index-get/set macros and optional bounds checking
+- [ ] #48 Dynamic `:str` allocation — consistent in-memory `{base:i32, len:i32}` layout for runtime-built strings; add `(str-alloc maxlen)` → i32 pointer to a zeroed header+buffer in the heap; add `(str-set-ptr s ptr)` / `(str-set-len s len)` setters; `(str/ptr s)` / `(str/len s)` getters already work via the fat-pointer accessors; this makes static `(defstatic name :str "text")` and dynamic heap strings share the same representation, enabling arrays of `:str`, return by pointer, and eventually a string-builder API
+- [x] #25 Arrays — `Array` type as a `(ptr, len, capacity)` struct with index-get/set macros and optional bounds checking
 - [x] #26 Tuples — multi-value return via the WASM multi-value proposal: `(defn divmod (a b) (:i32 :i32) ...)` + destructuring `(let (q r) (divmod 10 3) ...)`; avoids struct allocation for result pairs
 - [x] #42 Tuple locals — bind a multi-value result to a named local tuple variable without heap allocation; `(let pair (:i32 :i32) (minmax 4 3) ...)` expands internally to two locals `$pair_0 :i32` and `$pair_1 :i32`; accessors `(pair/0 pair)` and `(pair/1 pair)` read the individual fields; no `deftype` required; types inferred from the callee's declared tuple return annotation or taken from the inline type annotation; depends on #26
-- [ ] #27 Value-type structs — the type annotation at the use site determines storage; `deftype` only declares field layout
+- [x] #27 Value-type structs — the type annotation at the use site determines storage; `deftype` only declares field layout
   - `:Point` — value type: fields become WAT locals (`$p_x`, `$p_y`); no allocation
   - `:*Point` — reference type: one `i32` heap pointer (current implicit behavior); compiler emits `alloc` automatically
   - Constructor is the same in both cases: `(Point 10 20)` — no `Point/heap` / `Point/local` split
@@ -54,12 +59,30 @@
 
 ## Lower priority
 
-- [ ] #39 `proc_exit` after `main` — the generated `_start` function should call `proc_exit 0` immediately after `main` returns, ensuring a clean WASI exit code even when `main` does not call `proc_exit` itself
+- [x] #58 `:u8` field type in structs — 1-byte unsigned integer field in `deftype`; size 1, alignment 1; get emits `i32.load8_u`, set emits `i32.store8`; static constructors encode one escaped byte; WAT local type remains `i32` (WebAssembly has no u8 local)
+
+- [x] #49 Nested structs — a struct field whose type is another `deftype`
+  - Currently broken: `sizeOf` and `alignOf` in `env.ts` only know primitives; user-defined type names return size 1
+  - `sizeOf(t)` must recurse into `env.types` when `t` is a registered struct name
+  - `alignOf(t)` must return the alignment of the first field of the inner struct
+  - `expandFieldGet` / `expandFieldSet` must compute the correct flat byte offset (outer offset + inner field offset)
+  - Value-type let-binding must recursively expand nested struct fields into WAT locals (e.g. `outer_inner_x`, `outer_inner_y`)
+  - Reference-type binding already stores a flat pointer, so nested ref fields just need correct offsets
+
+- [x] #39 `proc_exit` after `main` — the generated `_start` function should call `proc_exit 0` immediately after `main` returns, ensuring a clean WASI exit code even when `main` does not call `proc_exit` itself
 
 - [ ] #28 Memory management — the current bump allocator never reclaims memory; any loop that allocates will exhaust linear memory
   - Option 1: `(alloc-reset)` — reset `$heap_ptr` to post-static baseline; frees everything at once; useful for request/response style programs
   - Option 2: stack allocator — push/pop a stack pointer for scoped allocations; zero overhead within a `let` block
   - Option 3: real `free` — per-object deallocation via a buddy or slab allocator; complex but necessary for general-purpose programs
+
+- [ ] #50 Ownership and lifetimes for heap-allocated structs — currently nothing in the language tracks who owns a `:*T` pointer or how long it lives
+  - The compiler allocates but never frees; callers cannot express "this function gives you ownership" vs "borrow only"
+  - Potential approaches (from lightest to heaviest):
+    - Convention-based: document ownership in comments; programmer calls `(free p)` manually when #28 option 3 exists
+    - Arena/scope lifetime: tie allocation lifetime to a `let` scope via a scope-local bump pointer; pointer becomes invalid after the `let` exits (compile-time enforcement optional)
+    - Linear types: mark a `:*T` as `own` vs `borrow` in the type system; compiler enforces that owned pointers are freed exactly once
+  - Depends on #28 (need a reclamation strategy before ownership matters)
 - [ ] #47 Number ↔ str conversions in `lib/string.woua`:
   - [x] `(i32->str n)` → `:str` — already done
   - [x] `(i64->str n)` → `:str` — already done
@@ -70,7 +93,8 @@
   - [ ] `(str->f32 s :str)` → `:f32` — parse float from string
   - [ ] `(str->f64 s :str)` → `:f64` — parse float from string
 - [ ] #30 `string-trim` in `lib/string.woua` — strip leading/trailing whitespace bytes
-- [ ] #31 `defvar` — mutable global variable (WAT `global` with get/set sugar)
+- [x] #31 `defvar` — mutable global variable (WAT `global` with get/set sugar)
+- [ ] #31b `defvar :NestedStruct` — `defvar` with value-type structs containing embedded structs (e.g. `(defvar r :Rect)` where `Rect` has a `Vec2` field); currently only flat structs work; nested fields need recursive sub-global registration and accessor dispatch
 - [ ] #32 Maps (hash maps) — hash function, collision handling, dynamic resizing; depends on arrays (#25) being available first
 - [ ] #33 Separate compilation — compile multiple `.woua` files independently and link them; needed once programs grow large; requires an export/import mechanism between woua modules
 - [ ] #34 VS Code extension — update syntax highlighting to recognise char literals (`'A'`, `'\n'`) and highlight them as numeric literals
@@ -88,5 +112,32 @@
   - **Sockets**: `sock_accept`, `sock_recv`, `sock_send`, `sock_shutdown`
   - **Poll**: `poll_oneoff` — wait on a set of events (WASI equivalent of `select`)
   - Highest practical value first: `fd_readdir`, `fd_filestat_get`, `path_filestat_get`, `path_remove_directory`, `fd_pread`/`fd_pwrite`, `poll_oneoff`
+
+- [x] #51 Object-oriented dispatch — static method dispatch via `defop` calling a `defn` (extends TODO #13)
+  - Extend `defop` to accept a function name in place of a WAT opcode: `(defop area "shape-area" (:*Shape) :i32)`
+  - The compiler emits `(call $shape-area ...)` instead of a WAT instruction
+  - Combined with overloading this gives CLOS-style generic functions: `(area circle)` and `(area rect)` dispatch to different implementations based on argument type
+  - No vtable or heap overhead — dispatch is resolved at compile time
+  - Depends on #13
+
+- [x] #52 Protocols — compile-time interface declaration and verification
+  - `(defprotocol Name (method (self :*Self) :RetType) ...)` declares a named set of required methods
+  - `(defimpl Name TypeName (defn method ...) ...)` provides the implementation; compiler verifies all methods are present with correct signatures
+  - A type satisfying a protocol can be passed wherever the protocol is expected (structural subtyping)
+  - The compiler can optionally generate a vtable struct automatically for runtime dispatch
+  - Builds on #51 (defop → defn dispatch) and #13
+
+- [ ] #60 Protocol as parameter type — allow a function to accept a protocol as a parameter type: `(defn print-shape (s :*Shape) :void ...)`
+  - Currently impossible: dispatch is purely compile-time and there is no runtime representation of a protocol value
+  - Option A: vtable — `defprotocol` generates a vtable struct (one function-pointer field per method); `defimpl` populates a static vtable instance; `:*Shape` becomes a fat pointer `(data :i32, vtable :i32)`; dispatch emits `call_indirect`
+  - Option B: monomorphic generics — the compiler specialises the function for each concrete type at call sites (no runtime overhead, but code duplication)
+  - Option A is more idiomatic for WASM; option B avoids vtable overhead; both depend on `first_class_fn` (#33 table) being solid
+
+- [ ] #61 Pattern matching — `(match expr (pattern body) ...)` form for structural dispatch
+  - More powerful than `cond`: matches on value, type, struct shape, or destructures a tuple/struct in one step
+  - Example: `(match x (0 "zero") ((< 0) "positive") (_ "negative"))`
+  - Struct destructuring: `(match p ((Point x y) (printf "%d %d\n" x y)))`
+  - Could compile to nested `if` + let-bindings for destructuring
+  - Depends on tuples (#26) and protocols (#52) for type-based dispatch
 
 

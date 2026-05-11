@@ -26,7 +26,7 @@
               (printf "error: could not open %s/%s\n" dir-arg path-arg)
               (proc_exit 1))
             (let buf      :ptr (alloc 512)
-              (let iov      :Iovec (alloc (+ (sizeof Iovec) 4))
+              (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
                 (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
                   (Iovec/len! iov 512)
                   (Iovec/base! iov buf)

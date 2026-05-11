@@ -109,6 +109,14 @@ for src in "$TESTS"/*.woua; do
     continue
   fi
 
+  # Parse optional @runtime annotation (default: wasmtime)
+  runtime="$(awk '/^;; @runtime / { print substr($0, 13); exit }' "$src")"
+  runtime="${runtime:-wasmtime}"
+  if ! command -v "$runtime" &>/dev/null; then
+    echo "SKIP  $name  (runtime '$runtime' not found)"
+    continue
+  fi
+
   # Extract @expect lines from the test file
   expected="$(awk '
     /^;; @expect / { print substr($0, 12); found=1; next }
@@ -145,26 +153,51 @@ for src in "$TESTS"/*.woua; do
 
   # Run and capture output (stdout normally, stderr when non-zero exit expected)
   if [ -n "$extra_args" ]; then
-    vcmd "wasmtime run $wasm_file $extra_args"
-    # shellcheck disable=SC2086
-    set +e
-    if [ "$expect_exit" != "0" ]; then
-      actual="$(wasmtime run "$wasm_file" $extra_args 2>&1 >/dev/null)"
+    if [ "$runtime" = "wasmer" ]; then
+      vcmd "wasmer run $wasm_file -- $extra_args"
+      # shellcheck disable=SC2086
+      set +e
+      if [ "$expect_exit" != "0" ]; then
+        actual="$(wasmer run "$wasm_file" -- $extra_args 2>&1 >/dev/null)"
+      else
+        actual="$(wasmer run "$wasm_file" -- $extra_args 2>/dev/null)"
+      fi
+      actual_exit=$?
+      set -e
     else
-      actual="$(wasmtime run "$wasm_file" $extra_args 2>/dev/null)"
+      vcmd "wasmtime run $wasm_file $extra_args"
+      # shellcheck disable=SC2086
+      set +e
+      if [ "$expect_exit" != "0" ]; then
+        actual="$(wasmtime run "$wasm_file" $extra_args 2>&1 >/dev/null)"
+      else
+        actual="$(wasmtime run "$wasm_file" $extra_args 2>/dev/null)"
+      fi
+      actual_exit=$?
+      set -e
     fi
-    actual_exit=$?
-    set -e
   else
-    vcmd "wasmtime $wasm_file"
-    set +e
-    if [ "$expect_exit" != "0" ]; then
-      actual="$(wasmtime "$wasm_file" 2>&1 >/dev/null)"
+    if [ "$runtime" = "wasmer" ]; then
+      vcmd "wasmer run $wasm_file"
+      set +e
+      if [ "$expect_exit" != "0" ]; then
+        actual="$(wasmer run "$wasm_file" 2>&1 >/dev/null)"
+      else
+        actual="$(wasmer run "$wasm_file" 2>/dev/null)"
+      fi
+      actual_exit=$?
+      set -e
     else
-      actual="$(wasmtime "$wasm_file" 2>/dev/null)"
+      vcmd "wasmtime $wasm_file"
+      set +e
+      if [ "$expect_exit" != "0" ]; then
+        actual="$(wasmtime "$wasm_file" 2>&1 >/dev/null)"
+      else
+        actual="$(wasmtime "$wasm_file" 2>/dev/null)"
+      fi
+      actual_exit=$?
+      set -e
     fi
-    actual_exit=$?
-    set -e
   fi
 
   if [ "$actual_exit" != "$expect_exit" ]; then

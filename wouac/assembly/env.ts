@@ -39,7 +39,7 @@ export class OpInfo {
 export class StaticInfo {
   ptr: i32;       // byte offset in linear memory
   len: i32;       // byte length (-1 for scalars)
-  typeName: string; // ":string", ":bytes", ":i32", ":f32", ":i64", ":f64", ":ptr", or a user type
+  typeName: string; // ":strlit", ":*str", ":bytes", ":i32", ":f32", ":i64", ":f64", ":ptr", or a user type
 
   constructor(ptr: i32, len: i32, typeName: string) {
     this.ptr = ptr;
@@ -47,7 +47,7 @@ export class StaticInfo {
     this.typeName = typeName;
   }
 
-  isString(): bool { return this.typeName == ":string"; }
+  isString(): bool { return this.typeName == ":strlit" || this.typeName == ":*str"; }
   isBytes():  bool { return this.typeName == ":bytes";  }
   isScalar(): bool { return this.len == -1;              }
 }
@@ -77,12 +77,26 @@ export class MacroInfo {
 
 // Info stored for each (deftype ...) declaration
 export class TypeInfo {
-  size:   i32;                    // total byte size of the struct
-  fields: Map<string, FieldInfo>; // field name → field info
+  size:       i32;                    // total byte size of the struct
+  fields:     Map<string, FieldInfo>; // field name → field info
+  fieldNames: Array<string>;          // field names in declaration order (for constructors)
 
   constructor(size: i32) {
-    this.size   = size;
-    this.fields = new Map<string, FieldInfo>();
+    this.size       = size;
+    this.fields     = new Map<string, FieldInfo>();
+    this.fieldNames = new Array<string>();
+  }
+}
+
+// Info stored for each (defvar ...) declaration
+export class GlobalInfo {
+  typeName:    string; // woua type keyword, e.g. ":i32" or ":Point"
+  initWat:     string; // WAT initializer expression, e.g. "(i32.const 0)"
+  isValueType: bool;   // true for value-type struct marker (no WAT global emitted)
+  constructor(typeName: string, initWat: string, isValueType: bool = false) {
+    this.typeName    = typeName;
+    this.initWat     = initWat;
+    this.isValueType = isValueType;
   }
 }
 
@@ -94,6 +108,27 @@ export class FuncTypeEntry {
   constructor(params: Array<string>, results: Array<string>) {
     this.params  = params;
     this.results = results;
+  }
+}
+
+// Info stored for a single method signature inside a (defprotocol ...) declaration.
+// :*Self is used as a placeholder for the implementing type.
+export class ProtocolMethodSig {
+  params: Array<string>; // param type keywords; :*Self = implementing type
+  result: string;        // return type keyword, or "" for void
+  constructor(params: Array<string>, result: string) {
+    this.params = params;
+    this.result = result;
+  }
+}
+
+// Info stored for each (defprotocol ...) declaration
+export class ProtocolInfo {
+  methods:     Map<string, ProtocolMethodSig>; // method name → signature
+  methodNames: Array<string>;                  // insertion order
+  constructor() {
+    this.methods     = new Map<string, ProtocolMethodSig>();
+    this.methodNames = new Array<string>();
   }
 }
 
@@ -164,6 +199,9 @@ export class Env {
   macros:     Map<string, MacroInfo>     = new Map<string, MacroInfo>();
   ops:        Map<string, Array<OpInfo>> = new Map<string, Array<OpInfo>>();
   literals:   Map<string, LiteralInfo>   = new Map<string, LiteralInfo>();
+  protocols:  Map<string, ProtocolInfo>  = new Map<string, ProtocolInfo>();
+  globals:    Map<string, GlobalInfo>    = new Map<string, GlobalInfo>();
+  globalNames: Array<string>             = new Array<string>();
 
   // ── Accumulated WAT output sections ─────────────────────────────────────────
   imports:     Array<ImportInfo>   = new Array<ImportInfo>();   // defimport declarations
@@ -189,15 +227,28 @@ export class Env {
   // ── Alignment helpers ────────────────────────────────────────────────────────
 
   alignOf(typeName: string): i32 {
+    if (typeName == ":u8")                                               return 1;
     if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr") return 4;
     if (typeName == ":i64" || typeName == ":f64")                        return 8;
-    return 1; // :string, :bytes
+    if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
+    // Embedded struct: align to first field
+    if (typeName.startsWith(":") && this.types.has(typeName.slice(1))) {
+      const ti = this.types.get(typeName.slice(1))!;
+      if (ti.fieldNames.length > 0) return this.alignOf(ti.fields.get(ti.fieldNames[0])!.typeName);
+      return 4;
+    }
+    return 4;
   }
 
   sizeOf(typeName: string): i32 {
+    if (typeName == ":u8")                                               return 1;
     if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr") return 4;
     if (typeName == ":i64" || typeName == ":f64")                        return 8;
-    return 1; // :string, :bytes (per-byte, caller multiplies by count)
+    if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
+    // Embedded struct: size from env.types
+    if (typeName.startsWith(":") && this.types.has(typeName.slice(1)))
+      return this.types.get(typeName.slice(1))!.size;
+    return 4; // fallback
   }
 
   // Advance the memory cursor with alignment, return the allocated pointer

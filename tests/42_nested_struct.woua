@@ -1,0 +1,57 @@
+;; @test nested_struct
+;; @feature structs containing other struct types as fields:
+;;   - :*T pointer fields (correct size/offset, i32.load/store)
+;;   - embedded :T fields (correct size/offset, sub-pointer returned by getter)
+;;   - value-type (:Outer) with embedded struct fields (recursive WAT locals)
+;;   - ref-type (:*Outer) with embedded struct fields (recursive constructor stores)
+;; @expect
+;;   sizeof Vec2: 8
+;;   sizeof Node: 8
+;;   sizeof Rect: 16
+;;   ref ptr field: 42
+;;   ref embedded x: 10
+;;   ref embedded y: 20
+;;   val x: 3
+;;   val y: 4
+;;   val sub x: 10
+;;   val sub y: 20
+
+(include io)
+
+(deftype Vec2
+  (x :i32)
+  (y :i32))
+
+;; Struct with a pointer-to-struct field (:*Vec2) and a plain :i32 field
+(deftype Node
+  (val :i32)
+  (pos :*Vec2))
+
+;; Struct with an embedded struct field (:Vec2 inline, not a pointer)
+(deftype Rect
+  (origin :Vec2)
+  (size   :Vec2))
+
+(defn main () :void
+  ;; ── Struct sizes ──────────────────────────────────────────────────────────
+  (printf "sizeof Vec2: %d\n" (sizeof Vec2))
+  (printf "sizeof Node: %d\n" (sizeof Node))
+  (printf "sizeof Rect: %d\n" (sizeof Rect))
+  ;; ── Ref-type with pointer-to-struct field (:*Vec2) ──────────────────────
+  (let v :*Vec2 (Vec2 10 20)
+    (let n :*Node (Node 42 v)
+      (printf "ref ptr field: %d\n" (Node/val n))
+      ;; Node/pos returns the i32 pointer stored in the field → can use Vec2/ on it
+      (let p :*Vec2 (Node/pos n)
+        (printf "ref embedded x: %d\n" (Vec2/x p))
+        (printf "ref embedded y: %d\n" (Vec2/y p)))))
+  ;; ── Value-type with flat scalar fields ────────────────────────────────────
+  (let pt :Vec2 (Vec2 3 4)
+    (printf "val x: %d\n" (Vec2/x pt))
+    (printf "val y: %d\n" (Vec2/y pt)))
+  ;; ── Ref-type with embedded struct fields (:Vec2 inline in Rect) ──────────
+  (let r :*Rect (Rect (Vec2 10 20) (Vec2 30 40))
+    ;; Rect/origin returns the sub-pointer (ptr + 0); Vec2/x on that gives x
+    (let orig :*Vec2 (Rect/origin r)
+      (printf "val sub x: %d\n" (Vec2/x orig))
+      (printf "val sub y: %d\n" (Vec2/y orig)))))

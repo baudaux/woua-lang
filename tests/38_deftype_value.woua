@@ -1,0 +1,44 @@
+;; @test deftype_value
+;; @feature value-type struct (:Point) stores fields in WAT locals, no heap allocation;
+;;   also tests passing :Point as function argument, returning :Point from a function,
+;;   and mutating fields via value-type setters (Point/x!)
+;; @expect
+;;   local x: 3
+;;   local y: 4
+;;   after set x: 99
+;;   after set y: 4
+;;   param x: 7
+;;   param y: 8
+;;   ret x: 0
+;;   ret y: 0
+
+(include io)
+
+(deftype Point
+  (x :i32)
+  (y :i32))
+
+;; Function that takes a value-type :Point param and prints it
+(defn print-point (label :str p :Point) :void
+  (printf "%s x: %d\n" label (Point/x p))
+  (printf "%s y: %d\n" label (Point/y p)))
+
+;; Function that returns a value-type :Point
+(defn make-zero () :Point
+  (Point 0 0))
+
+(defn main () :void
+  ;; Value-type let: fields in WAT locals, no alloc
+  (let p :Point (Point 3 4)
+    (printf "local x: %d\n" (Point/x p))
+    (printf "local y: %d\n" (Point/y p))
+    ;; Mutate a field via setter — modifies the WAT local in place
+    (Point/x! p 99)
+    (printf "after set x: %d\n" (Point/x p))
+    (printf "after set y: %d\n" (Point/y p))
+    ;; Pass value-type struct as function argument
+    (print-point "param" (Point 7 8))
+    ;; Receive :Point return from function
+    (let q :Point (make-zero)
+      (printf "ret x: %d\n" (Point/x q))
+      (printf "ret y: %d\n" (Point/y q)))))
