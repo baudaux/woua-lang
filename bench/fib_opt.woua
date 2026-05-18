@@ -1,0 +1,33 @@
+;; bench/fib_opt.woua — fib(43) with single-recursion optimisation.
+;;
+;; The naive recursive form makes two calls: fib(n-1) + fib(n-2).
+;; LLVM -O rewrites this so one branch becomes a loop accumulator — only
+;; fib(n-1) recurses, while fib(n-2) is folded into the loop by decrementing
+;; n by 2 each iteration.  This halves the call-tree depth and roughly doubles
+;; throughput versus the naive version.
+;;
+;; This file writes that same transformation by hand so woua can match
+;; the Rust -O result without needing a compiler optimiser.
+
+(include io)
+(include time)
+
+(defn fib-opt (n :i32) :i32
+  (if (< n 2)
+    n
+    (let acc :i32 0
+      (let k :i32 n
+        (set! acc (+ acc (fib-opt (- k 1))))
+        (set! k (- k 2))
+        (while (> k 1)
+          (set! acc (+ acc (fib-opt (- k 1))))
+          (set! k (- k 2)))
+        (+ k acc)))))
+
+(defn main () :void
+  (let start :i64 (time-now-ns)
+    (let result :i32 (fib-opt 43)
+      (let elapsed :i64 (- (time-now-ns) start)
+        (printf "fib_opt(43) = %d, time = %ld ms\n"
+          result
+          (/ elapsed 1000000i64))))))

@@ -1,0 +1,34 @@
+;; bench/fib_opt2.woua — fib(43) fully iterative, zero recursion.
+;;
+;; Keeps two running values a and b; each step: a,b = b, a+b.
+;; O(n) time, O(1) space, no call stack overhead whatsoever.
+;; Repeated 1 000 000 times so the result is measurable in ms.
+
+(include io)
+(include time)
+
+(defconst FIB_REPS 1000000)
+
+(defn fib-iter (n :i32) :i32
+  (let a :i32 0
+    (let b :i32 1
+      (let i :i32 0
+        (while (< i n)
+          (let tmp :i32 (+ a b)
+            (set! a b)
+            (set! b tmp))
+          (set! i (+ i 1)))
+        a))))
+
+(defn main () :void
+  (let start :i64 (time-now-ns)
+    (let result :i32 0
+      (let r :i32 0
+        (while (< r FIB_REPS)
+          (set! result (fib-iter 43))
+          (set! r (+ r 1)))
+        (let elapsed :i64 (- (time-now-ns) start)
+          (printf "fib_iter(43) = %d, reps = %d, time = %ld ms\n"
+            result FIB_REPS
+            (/ elapsed 1000000i64))
+          (assert (= result 433494437) "fib_iter(43) correctness check failed"))))))

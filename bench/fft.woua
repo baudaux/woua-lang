@@ -1,0 +1,107 @@
+;; bench/fft.woua — 4096-point Cooley-Tukey FFT (in-place iterative DIT).
+;; Tests complex f64 arithmetic and divide-and-conquer memory access patterns.
+;; Uses lib/math.woua for sin/cos twiddle factor computation.
+;; Needs > 1 page of WASM memory (re + im arrays = 64 KB); grows by 2 pages.
+;; Compare: rustc -O bench_fft.rs -o out/bench_fft && ./out/bench_fft
+
+(include io)
+(include time)
+(include math)
+
+(defconst FFT-N     4096)
+(defconst FFT-LOG2N 12)
+(defconst FFT-BYTES 32768)   ;; FFT-N * 8
+(defconst FFT-REPS  1000)    ;; repetitions for measurable elapsed time
+
+;; f64 array helpers: index-based load/store
+(defmacro f64-get (ptr idx)
+  (f64.load (+ ptr (* idx 8))))
+
+(defmacro f64-set (ptr idx v)
+  (f64.store (+ ptr (* idx 8)) v))
+
+;; Bit-reversal of an n-bit integer (using /2 and *2 instead of shift operators).
+(defn bit-reverse (x :i32 bits :i32) :i32
+  (let r :i32 0
+    (let i :i32 0
+      (while (< i bits)
+        (set! r (or (* r 2) (and x 1)))
+        (set! x (/ x 2))
+        (set! i (+ i 1)))
+      r)))
+
+;; Bit-reverse permutation in place on re[] and im[].
+(defn fft-permute (re :ptr im :ptr n :i32 log2n :i32) :void
+  (for pi 0 n
+    (let pj :i32 (bit-reverse pi log2n)
+      (if (< pi pj)
+        (let tr :f64 (f64-get re pi)
+          (let ti :f64 (f64-get im pi)
+            (f64-set re pi (f64-get re pj))
+            (f64-set im pi (f64-get im pj))
+            (f64-set re pj tr)
+            (f64-set im pj ti)))))))
+
+;; One butterfly stage: mmax is the current sub-DFT length (2, 4, 8, ..., N).
+(defn fft-stage (re :ptr im :ptr n :i32 mmax :i32) :void
+  (let half  :i32 (/ mmax 2)
+    (let angle :f64 (/ (* -2.0f64 3.141592653589793f64) (as :f64 mmax))
+      (let wr0 :f64 (cos angle)
+        (let wi0 :f64 (sin angle)
+          (let k :i32 0
+            (while (< k n)
+              (let cr :f64 1.0f64
+                (let ci :f64 0.0f64
+                  (let j :i32 0
+                    (while (< j half)
+                      (let idx_j  :i32 (+ k j)
+                        (let idx_jh :i32 (+ (+ k j) half)
+                          (let tr :f64 (- (* cr (f64-get re idx_jh))
+                                          (* ci (f64-get im idx_jh)))
+                            (let ti :f64 (+ (* cr (f64-get im idx_jh))
+                                             (* ci (f64-get re idx_jh)))
+                              (let ncr :f64 (- (* cr wr0) (* ci wi0))
+                                (let nci :f64 (+ (* cr wi0) (* ci wr0))
+                                  (f64-set re idx_jh (- (f64-get re idx_j) tr))
+                                  (f64-set im idx_jh (- (f64-get im idx_j) ti))
+                                  (f64-set re idx_j  (+ (f64-get re idx_j) tr))
+                                  (f64-set im idx_j  (+ (f64-get im idx_j) ti))
+                                  (set! cr ncr)
+                                  (set! ci nci)))))))
+                      (set! j (+ j 1))))))
+              (set! k (+ k mmax)))))))))
+
+;; Full in-place iterative Cooley-Tukey FFT.
+(defn fft (re :ptr im :ptr n :i32 log2n :i32) :void
+  (fft-permute re im n log2n)
+  (let mmax :i32 1
+    (while (< mmax n)
+      (set! mmax (* mmax 2))
+      (fft-stage re im n mmax))))
+
+(defn main () :void
+  (drop (memory-grow 2))
+  (let re :ptr (alloc FFT-BYTES)
+    (let im :ptr (alloc FFT-BYTES)
+      ;; Initialise: impulse at index 0 (re[0]=1, all others 0)
+      (for fi 0 FFT-N
+        (f64-set re fi 0.0f64)
+        (f64-set im fi 0.0f64))
+      (f64-set re 0 1.0f64)
+      ;; Time FFT-REPS runs
+      (let start :i64 (time-now-ns)
+        (for rep 0 FFT-REPS
+          (fft re im FFT-N FFT-LOG2N)
+          ;; Re-initialise for the next rep (re-use same buffers)
+          (for fi 0 FFT-N
+            (f64-set re fi 0.0f64)
+            (f64-set im fi 0.0f64))
+          (f64-set re 0 1.0f64))
+        (let elapsed :i64 (- (time-now-ns) start)
+          ;; Run one final FFT whose output we check
+          (fft re im FFT-N FFT-LOG2N)
+          ;; Impulse FFT → all output bins = 1+0i; check re[1] ≈ 1
+(printf "fft N=%d reps=%d in %ld ms, re[1]=%ld (expect 1)\n"
+            FFT_N FFT_REPS
+            (/ elapsed 1000000i64)
+            (as :i64 (round (f64-get re 1)))))))))

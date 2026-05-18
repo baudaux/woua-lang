@@ -1,0 +1,19 @@
+;; bench/sum.woua — XOR checksum of i*i for i in 0..100M in a tight i64 loop.
+;; Uses xor-of-squares to prevent LLVM/wasmtime from constant-folding the loop.
+;; Tests raw loop overhead vs native Rust -O.
+;; Compare: rustc -O bench_sum.rs -o out/bench_sum && ./out/bench_sum
+
+(include io)
+(include time)
+
+(defn main () :void
+  (let start :i64 (time-now-ns)
+    (let sum :i64 0i64
+      (let i :i64 0i64
+        (while (< i 100000000i64)
+          (set! sum (xor sum (* i i)))
+          (set! i (+ i 1i64)))
+        (let elapsed :i64 (- (time-now-ns) start)
+(printf "sum = %ld, time = %ld ms\n"
+            sum
+            (/ elapsed 1000000i64)))))))
