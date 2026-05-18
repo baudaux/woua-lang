@@ -7,7 +7,7 @@
   (let buf     :ptr (alloc 256)
     (let running :i32 1
       (while running
-        (let line :str (read-line 0 buf 256)
+        (let line :str (read-line STDIN buf 256)
           (if (string-eq line "quit")
             (set! running 0)
             (let _d :i32 0

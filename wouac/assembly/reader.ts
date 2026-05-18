@@ -5,7 +5,8 @@
 // patterns registered between calls (via streaming include resolution) are
 // picked up immediately.
 
-import { Node, IntNode, FloatNode, SymbolNode, StringNode, RegexNode, ListNode, CommentNode } from "./ast";
+import { Node, IntNode, FloatNode, SymbolNode, StringNode, RegexNode, ListNode, CommentNode,
+         V128Node, TAG_V128 } from "./ast";
 import { Env, LiteralInfo } from "./env";
 
 export class Reader {
@@ -90,7 +91,11 @@ export class Reader {
     for (let i = 0; i < names.length; i++) {
       const info = lits.get(names[i])!;
       if (info.nodeType == ":i32" || info.nodeType == ":i64" ||
-          info.nodeType == ":f32" || info.nodeType == ":f64") continue;
+          info.nodeType == ":f32" || info.nodeType == ":f64" ||
+          info.nodeType == ":v128" ||
+          info.nodeType == ":i8x16" || info.nodeType == ":i16x8" ||
+          info.nodeType == ":i32x4" || info.nodeType == ":i64x2" ||
+          info.nodeType == ":f32x4" || info.nodeType == ":f64x2") continue;
       if (c == info.pattern.charAt(0)) {
         return this.readLiteral(info);
       }
@@ -243,6 +248,51 @@ export class Reader {
       if ((info.nodeType == ":f32" || info.nodeType == ":f64") && isFloat(token))
         return new FloatNode(F64.parseFloat(token), info.nodeType == ":f64");
     }
+    // ── SIMD vector literal: driven by (defliteral ... :v128) in env.literals ──
+    // e.g. `1:2:3:4i32x4`, `5f32x4` (splat). Lane count is derived from the
+    // suffix: the digits after the last 'x' ("i32x4" → 4, "i8x16" → 16).
+    for (let i = 0; i < names.length; i++) {
+      const info = lits.get(names[i])!;
+      if (info.nodeType != ":v128" && info.nodeType != ":i8x16" && info.nodeType != ":i16x8" &&
+          info.nodeType != ":i32x4" && info.nodeType != ":i64x2" &&
+          info.nodeType != ":f32x4" && info.nodeType != ":f64x2") continue;
+      const suf = info.suffix;
+      if (suf.length == 0 || !token.endsWith(suf)) continue;
+      const lanesPart = token.slice(0, token.length - suf.length);
+      if (lanesPart.length == 0) continue; // bare suffix is a symbol
+      const floatLanes = suf.charAt(0) == "f";
+      const xIdx = suf.lastIndexOf("x");
+      const laneCount = xIdx >= 0 ? i32(I64.parseInt(suf.slice(xIdx + 1))) : 0;
+      if (laneCount <= 0) continue;
+      // Parse colon-separated lane values
+      const rawVals = new Array<f64>();
+      let start = 0;
+      let valid = true;
+      for (let ci = 0; ci <= lanesPart.length && valid; ci++) {
+        if (ci == lanesPart.length || lanesPart.charAt(ci) == ":") {
+          const part = lanesPart.slice(start, ci);
+          if (part.length == 0) { valid = false; break; }
+          if (floatLanes) {
+            if (!isFloat(part) && !isInteger(part)) { valid = false; break; }
+            rawVals.push(F64.parseFloat(part));
+          } else {
+            if (!isInteger(part)) { valid = false; break; }
+            rawVals.push(f64(I64.parseInt(part)));
+          }
+          start = ci + 1;
+        }
+      }
+      if (!valid) continue;
+      // Must be either 1 value (splat) or exactly laneCount values
+      if (rawVals.length != 1 && rawVals.length != laneCount) continue;
+      const vals = new Array<f64>();
+      if (rawVals.length == 1) {
+        for (let li = 0; li < laneCount; li++) vals.push(rawVals[0]);
+      } else {
+        for (let li = 0; li < laneCount; li++) vals.push(rawVals[li]);
+      }
+      return new V128Node(suf, vals);
+    }
     return new SymbolNode(token);
   }
 
@@ -294,15 +344,26 @@ function isFloat(token: string): bool {
   if (token.length == 0) return false;
   let hasDot = false;
   let hasExp = false;
+  let hasDigit = false;
   let start  = 0;
   if (token.charAt(0) == "-") start = 1;
   if (start >= token.length)  return false;
   for (let i = start; i < token.length; i++) {
     const c = token.charAt(i);
     if (c == ".") { if (hasDot) return false; hasDot = true; continue; }
-    if (c == "e" || c == "E") { if (hasExp) return false; hasExp = true; continue; }
-    if (c == "+" || c == "-") { if (i == 0) continue; return false; }
+    if (c == "e" || c == "E") {
+      if (hasExp || !hasDigit) return false;  // exponent requires preceding digits
+      hasExp = true; continue;
+    }
+    if (c == "+" || c == "-") {
+      // Allow sign only at position 0 or immediately after 'e'/'E'
+      if (i == 0) continue;
+      const prev = token.charAt(i - 1);
+      if (prev == "e" || prev == "E") continue;
+      return false;
+    }
     if (!isDigit(c)) return false;
+    hasDigit = true;
   }
   return hasDot || hasExp;
 }

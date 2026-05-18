@@ -1,0 +1,59 @@
+;; @test simd_f32x4_ops
+;; @feature f32x4 add, sub, div, sqrt, neg, abs, min, max
+;; a=(1 4 9 16) b=(1 2 3 4)
+;;   add: 2 6 12 20
+;;   sub: 0 2 6 12
+;;   div: 1 2 3 4
+;;   sqrt a: 1 2 3 4
+;;   neg a: -1 -4 -9 -16
+;;   abs(neg a): 1 4 9 16
+;;   min: 1 2 3 4
+;;   max: 1 4 9 16
+;; @expect
+;;   add: 2.000000 6.000000 12.000000 20.000000
+;;   sub: 0.000000 2.000000 6.000000 12.000000
+;;   div: 1.000000 2.000000 3.000000 4.000000
+;;   sqrt: 1.000000 2.000000 3.000000 4.000000
+;;   neg: -1.000000 -4.000000 -9.000000 -16.000000
+;;   abs: 1.000000 4.000000 9.000000 16.000000
+;;   min: 1.000000 2.000000 3.000000 4.000000
+;;   max: 1.000000 4.000000 9.000000 16.000000
+
+(include io)
+(include simd)
+
+(defn main () :void
+  (let a :f32x4 1.0:4.0:9.0:16.0f32x4
+    (let b :f32x4 1.0:2.0:3.0:4.0f32x4
+      (let r+ :f32x4 (+ a b)
+        (let r- :f32x4 (- a b)
+          (let r/ :f32x4 (/ a b)
+            (let rsq :f32x4 (sqrt a)
+              (let rng :f32x4 (neg a)
+                (let rab :f32x4 (abs rng)
+                  (let rmn :f32x4 (min a b)
+                    (let rmx :f32x4 (max a b)
+                      (printf "add: %f %f %f %f\n"
+                        (extract_lane 0 r+) (extract_lane 1 r+)
+                        (extract_lane 2 r+) (extract_lane 3 r+))
+                      (printf "sub: %f %f %f %f\n"
+                        (extract_lane 0 r-) (extract_lane 1 r-)
+                        (extract_lane 2 r-) (extract_lane 3 r-))
+                      (printf "div: %f %f %f %f\n"
+                        (extract_lane 0 r/) (extract_lane 1 r/)
+                        (extract_lane 2 r/) (extract_lane 3 r/))
+                      (printf "sqrt: %f %f %f %f\n"
+                        (extract_lane 0 rsq) (extract_lane 1 rsq)
+                        (extract_lane 2 rsq) (extract_lane 3 rsq))
+                      (printf "neg: %f %f %f %f\n"
+                        (extract_lane 0 rng) (extract_lane 1 rng)
+                        (extract_lane 2 rng) (extract_lane 3 rng))
+                      (printf "abs: %f %f %f %f\n"
+                        (extract_lane 0 rab) (extract_lane 1 rab)
+                        (extract_lane 2 rab) (extract_lane 3 rab))
+                      (printf "min: %f %f %f %f\n"
+                        (extract_lane 0 rmn) (extract_lane 1 rmn)
+                        (extract_lane 2 rmn) (extract_lane 3 rmn))
+                      (printf "max: %f %f %f %f\n"
+                        (extract_lane 0 rmx) (extract_lane 1 rmx)
+                        (extract_lane 2 rmx) (extract_lane 3 rmx)))))))))))))

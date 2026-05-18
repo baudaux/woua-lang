@@ -1,0 +1,475 @@
+;; SVG rendering library — write SVG elements to a virtual /dev/svg fd.
+;;
+;; The JS bridge (js/svg-bridge.js) intercepts fd_write to fd SVG-FD (default 4)
+;; and upserts elements into a live DOM <svg> by element id.
+;;
+;; Protocol (newline-terminated messages written to SVG-FD):
+;;   <tag id="ID" attr="val" .../>\n   — upsert element with that id
+;;   <tag id="ID" ...>TEXT</tag>\n     — upsert element with text content
+;;   <!remove ID>\n                     — remove element with id ID
+;;   <!clear>\n                         — remove all non-defs children
+;;   <!parent ID>\n                     — set insertion parent (default: root svg)
+;;   <!parent-root>\n                   — reset insertion parent to root svg
+;;   <!style ID CSS>\n                  — set style attribute on element ID
+;;   <!transform ID T>\n                — set transform attribute on element ID
+;;   <!attr ID NAME VALUE>\n            — set arbitrary attribute on element ID
+;;
+;; Usage:
+;;   (include svg)
+;;   (let buf :*SvgBuf (svg-buf-new 4096))
+;;   (svg-circle buf "c1" 50 50 20 "#FF0000")
+;;   (svg-flush buf)
+
+(include io)
+
+;; Default file descriptor for SVG output (intercepted by the JS bridge).
+(defconst SVG-FD 4)
+
+;; ── SvgBuf ───────────────────────────────────────────────────────────────────
+;; A growable byte buffer for building SVG protocol messages.
+;; Fields:
+;;   ptr  — pointer to the backing allocation
+;;   len  — number of bytes currently written
+;;   cap  — total capacity in bytes
+(deftype SvgBuf
+  (ptr :ptr)
+  (len :i32)
+  (cap :i32))
+
+;; (svg-buf-new cap) → :*SvgBuf
+(defn svg-buf-new (cap) :*SvgBuf
+  (let buf :*SvgBuf (alloc (sizeof SvgBuf))
+    (SvgBuf/ptr! buf (alloc cap))
+    (SvgBuf/len! buf 0)
+    (SvgBuf/cap! buf cap)
+    buf))
+
+;; (svg-buf-reset buf) — reset the write cursor to the start.
+(defmacro svg-buf-reset (buf)
+  (SvgBuf/len! buf 0))
+
+;; Internal: append a single byte to buf.
+(defmacro __svg-byte (buf b)
+  (let __p :ptr (SvgBuf/ptr buf)
+    (let __l :i32 (SvgBuf/len buf)
+      (i32.store8 (+ __p __l) b)
+      (SvgBuf/len! buf (+ __l 1)))))
+
+;; Internal: append all bytes of str s to buf (defn, not macro).
+(defn __svg-str (buf :*SvgBuf s :str)
+  (let p  :ptr (str/ptr s)
+    (let n  :i32 (str/len s)
+      (let bp :ptr (SvgBuf/ptr buf)
+        (let l  :i32 (SvgBuf/len buf)
+          (let i  :i32 0
+            (while (< i n)
+              (i32.store8 (+ bp (+ l i)) (i32.load8_u (+ p i)))
+              (set! i (+ i 1))))
+          (SvgBuf/len! buf (+ l n)))))))
+
+;; Internal: append decimal digits of i32 n to buf.
+(defmacro __svg-int (buf n)
+  (__svg-str buf (i32->str n)))
+
+;; Internal: append decimal digits of f32 n to buf.
+(defmacro __svg-f32 (buf n)
+  (__svg-str buf (f32->str n)))
+
+;; (svg-flush buf) — write buffer contents to SVG-FD and reset.
+(defmacro svg-flush (buf)
+  (progn
+    (write SVG-FD (SvgBuf/ptr buf) (SvgBuf/len buf))
+    (svg-buf-reset buf)))
+
+;; (svg-flush-to buf fd) — like svg-flush but to an explicit fd.
+;; Useful for testing: (svg-flush-to buf STDOUT) and redirect > file.svg
+(defmacro svg-flush-to (buf fd)
+  (progn
+    (write fd (SvgBuf/ptr buf) (SvgBuf/len buf))
+    (svg-buf-reset buf)))
+
+;; Internal: open a tag, write id attr.  Leaves the element open.
+;;   <TAG id="ID"
+(defmacro __svg-open-tag (buf tag id)
+  (progn
+    (__svg-byte buf 60)        ;; <
+    (__svg-str buf tag)
+    (__svg-str buf " id=\"")
+    (__svg-str buf id)
+    (__svg-byte buf 34)))      ;; "
+
+;; Internal: close a self-closing tag with />\n
+(defmacro __svg-close-self (buf)
+  (progn
+    (__svg-byte buf 47)        ;; /
+    (__svg-byte buf 62)        ;; >
+    (__svg-byte buf 10)))      ;; \n
+
+;; Internal: close an open-tag (not self-closing) with >\n
+(defmacro __svg-close-open (buf)
+  (progn
+    (__svg-byte buf 62)        ;; >
+    (__svg-byte buf 10)))      ;; \n
+
+;; Internal: write a closing tag </TAG>\n
+(defmacro __svg-close-tag (buf tag)
+  (progn
+    (__svg-str buf "</")
+    (__svg-str buf tag)
+    (__svg-byte buf 62)        ;; >
+    (__svg-byte buf 10)))      ;; \n
+
+;; Internal: write attr="val" (string value)
+(defmacro __svg-attr-s (buf name val)
+  (progn
+    (__svg-byte buf 32)        ;; space
+    (__svg-str buf name)
+    (__svg-byte buf 61)        ;; =
+    (__svg-byte buf 34)        ;; "
+    (__svg-str buf val)
+    (__svg-byte buf 34)))      ;; "
+
+;; Internal: write attr="N" (i32 value)
+(defmacro __svg-attr-i (buf name val)
+  (progn
+    (__svg-byte buf 32)
+    (__svg-str buf name)
+    (__svg-byte buf 61)
+    (__svg-byte buf 34)
+    (__svg-int buf val)
+    (__svg-byte buf 34)))
+
+;; Internal: write attr="F" (f32 value)
+(defmacro __svg-attr-f (buf name val)
+  (progn
+    (__svg-byte buf 32)
+    (__svg-str buf name)
+    (__svg-byte buf 61)
+    (__svg-byte buf 34)
+    (__svg-f32 buf val)
+    (__svg-byte buf 34)))
+
+;; ── Shape commands ────────────────────────────────────────────────────────────
+
+;; (svg-line buf id x1 y1 x2 y2 stroke)
+(defmacro svg-line (buf id x1 y1 x2 y2 stroke)
+  (progn
+    (__svg-open-tag buf "line" id)
+    (__svg-attr-i buf "x1" x1)
+    (__svg-attr-i buf "y1" y1)
+    (__svg-attr-i buf "x2" x2)
+    (__svg-attr-i buf "y2" y2)
+    (__svg-attr-s buf "stroke" stroke)
+    (__svg-close-self buf)))
+
+;; (svg-line-f buf id x1 y1 x2 y2 stroke) — float coordinates
+(defmacro svg-line-f (buf id x1 y1 x2 y2 stroke)
+  (progn
+    (__svg-open-tag buf "line" id)
+    (__svg-attr-f buf "x1" x1)
+    (__svg-attr-f buf "y1" y1)
+    (__svg-attr-f buf "x2" x2)
+    (__svg-attr-f buf "y2" y2)
+    (__svg-attr-s buf "stroke" stroke)
+    (__svg-close-self buf)))
+
+;; (svg-rect buf id x y w h fill)
+(defmacro svg-rect (buf id x y w h fill)
+  (progn
+    (__svg-open-tag buf "rect" id)
+    (__svg-attr-i buf "x" x)
+    (__svg-attr-i buf "y" y)
+    (__svg-attr-i buf "width" w)
+    (__svg-attr-i buf "height" h)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-rect-f buf id x y w h fill) — float coordinates
+(defmacro svg-rect-f (buf id x y w h fill)
+  (progn
+    (__svg-open-tag buf "rect" id)
+    (__svg-attr-f buf "x" x)
+    (__svg-attr-f buf "y" y)
+    (__svg-attr-f buf "width" w)
+    (__svg-attr-f buf "height" h)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-circle buf id cx cy r fill)
+(defmacro svg-circle (buf id cx cy r fill)
+  (progn
+    (__svg-open-tag buf "circle" id)
+    (__svg-attr-i buf "cx" cx)
+    (__svg-attr-i buf "cy" cy)
+    (__svg-attr-i buf "r" r)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-circle-f buf id cx cy r fill) — float coordinates
+(defmacro svg-circle-f (buf id cx cy r fill)
+  (progn
+    (__svg-open-tag buf "circle" id)
+    (__svg-attr-f buf "cx" cx)
+    (__svg-attr-f buf "cy" cy)
+    (__svg-attr-f buf "r" r)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-ellipse buf id cx cy rx ry fill)
+(defmacro svg-ellipse (buf id cx cy rx ry fill)
+  (progn
+    (__svg-open-tag buf "ellipse" id)
+    (__svg-attr-i buf "cx" cx)
+    (__svg-attr-i buf "cy" cy)
+    (__svg-attr-i buf "rx" rx)
+    (__svg-attr-i buf "ry" ry)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-ellipse-f buf id cx cy rx ry fill) — floats
+(defmacro svg-ellipse-f (buf id cx cy rx ry fill)
+  (progn
+    (__svg-open-tag buf "ellipse" id)
+    (__svg-attr-f buf "cx" cx)
+    (__svg-attr-f buf "cy" cy)
+    (__svg-attr-f buf "rx" rx)
+    (__svg-attr-f buf "ry" ry)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-close-self buf)))
+
+;; (svg-text buf id x y fill content)
+;; Emits: <text id="ID" x="X" y="Y" fill="FILL">CONTENT</text>
+(defmacro svg-text (buf id x y fill content)
+  (progn
+    (__svg-open-tag buf "text" id)
+    (__svg-attr-i buf "x" x)
+    (__svg-attr-i buf "y" y)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-byte buf 62)        ;; > — open the element
+    (__svg-str buf content)
+    (__svg-close-tag buf "text")))
+
+;; (svg-text-f buf id x y fill content) — float coordinates
+(defmacro svg-text-f (buf id x y fill content)
+  (progn
+    (__svg-open-tag buf "text" id)
+    (__svg-attr-f buf "x" x)
+    (__svg-attr-f buf "y" y)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-byte buf 62)
+    (__svg-str buf content)
+    (__svg-close-tag buf "text")))
+
+;; (svg-path buf id d fill stroke)
+(defmacro svg-path (buf id d fill stroke)
+  (progn
+    (__svg-open-tag buf "path" id)
+    (__svg-attr-s buf "d" d)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-attr-s buf "stroke" stroke)
+    (__svg-close-self buf)))
+
+;; (svg-polygon buf id points fill stroke)
+(defmacro svg-polygon (buf id points fill stroke)
+  (progn
+    (__svg-open-tag buf "polygon" id)
+    (__svg-attr-s buf "points" points)
+    (__svg-attr-s buf "fill" fill)
+    (__svg-attr-s buf "stroke" stroke)
+    (__svg-close-self buf)))
+
+;; (svg-polyline buf id points stroke)
+(defmacro svg-polyline (buf id points stroke)
+  (progn
+    (__svg-open-tag buf "polyline" id)
+    (__svg-attr-s buf "points" points)
+    (__svg-attr-s buf "stroke" stroke)
+    (__svg-attr-s buf "fill" "none")
+    (__svg-close-self buf)))
+
+;; ── Grouping ─────────────────────────────────────────────────────────────────
+
+;; (svg-group buf id) — create a <g> group and set it as the insertion parent.
+(defmacro svg-group (buf id)
+  (progn
+    (__svg-open-tag buf "g" id)
+    (__svg-close-self buf)
+    (__svg-str buf "<!parent ")
+    (__svg-str buf id)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; (svg-group-end buf) — reset insertion parent to root svg.
+(defmacro svg-group-end (buf)
+  (progn
+    (__svg-str buf "<!parent-root>")
+    (__svg-byte buf 10)))
+
+;; (svg-parent buf id) — explicitly set parent to element with given id.
+(defmacro svg-parent (buf id)
+  (progn
+    (__svg-str buf "<!parent ")
+    (__svg-str buf id)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+;; (svg-remove buf id) — remove element with given id.
+(defmacro svg-remove (buf id)
+  (progn
+    (__svg-str buf "<!remove ")
+    (__svg-str buf id)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; (svg-clear buf) — remove all non-defs children from root svg.
+(defmacro svg-clear (buf)
+  (progn
+    (__svg-str buf "<!clear>")
+    (__svg-byte buf 10)))
+
+;; ── Attribute commands ────────────────────────────────────────────────────────
+
+;; (svg-style buf id css) — set the style attribute on element id.
+(defmacro svg-style (buf id css)
+  (progn
+    (__svg-str buf "<!style ")
+    (__svg-str buf id)
+    (__svg-byte buf 32)
+    (__svg-str buf css)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; (svg-transform buf id t) — set the transform attribute on element id.
+(defmacro svg-transform (buf id t)
+  (progn
+    (__svg-str buf "<!transform ")
+    (__svg-str buf id)
+    (__svg-byte buf 32)
+    (__svg-str buf t)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; (svg-attr buf id name value) — set an arbitrary attribute on element id.
+(defmacro svg-attr (buf id name value)
+  (progn
+    (__svg-str buf "<!attr ")
+    (__svg-str buf id)
+    (__svg-byte buf 32)
+    (__svg-str buf name)
+    (__svg-byte buf 32)
+    (__svg-str buf value)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
+
+;; ── Gradients ─────────────────────────────────────────────────────────────────
+
+;; (svg-linear-gradient buf id x1 y1 x2 y2)
+(defmacro svg-linear-gradient (buf id x1 y1 x2 y2)
+  (progn
+    (__svg-open-tag buf "linearGradient" id)
+    (__svg-attr-i buf "x1" x1)
+    (__svg-attr-i buf "y1" y1)
+    (__svg-attr-i buf "x2" x2)
+    (__svg-attr-i buf "y2" y2)
+    (__svg-close-self buf)))
+
+;; (svg-radial-gradient buf id cx cy r fx fy)
+(defmacro svg-radial-gradient (buf id cx cy r fx fy)
+  (progn
+    (__svg-open-tag buf "radialGradient" id)
+    (__svg-attr-i buf "cx" cx)
+    (__svg-attr-i buf "cy" cy)
+    (__svg-attr-i buf "r" r)
+    (__svg-attr-i buf "fx" fx)
+    (__svg-attr-i buf "fy" fy)
+    (__svg-close-self buf)))
+
+;; (svg-gradient-stop buf id offset color opacity)
+;; offset is 0..100 (written as "NN%")
+(defmacro svg-gradient-stop (buf id offset color opacity)
+  (progn
+    (__svg-open-tag buf "stop" id)
+    (__svg-byte buf 32)
+    (__svg-str buf "offset=\"")
+    (__svg-int buf offset)
+    (__svg-byte buf 37)     ;; %
+    (__svg-byte buf 34)     ;; "
+    (__svg-attr-s buf "stop-color" color)
+    (__svg-attr-f buf "stop-opacity" opacity)
+    (__svg-close-self buf)))
+
+;; ── Clip paths ────────────────────────────────────────────────────────────────
+
+;; (svg-clip-begin buf id) — open a <clipPath> definition.
+(defmacro svg-clip-begin (buf id)
+  (progn
+    (__svg-open-tag buf "clipPath" id)
+    (__svg-close-self buf)
+    (svg-parent buf id)))
+
+;; (svg-clip-end buf) — close clipPath context, reset parent to root.
+(defmacro svg-clip-end (buf)
+  (svg-group-end buf))
+
+;; (svg-clip buf id clip-id) — apply clip-path="url(#CLIP-ID)" to element id.
+(defmacro svg-clip (buf id clip-id)
+  (progn
+    (__svg-str buf "<!attr ")
+    (__svg-str buf id)
+    (__svg-str buf " clip-path url(#")
+    (__svg-str buf clip-id)
+    (__svg-byte buf 41)   ;; )
+    (__svg-byte buf 62)   ;; >
+    (__svg-byte buf 10)))
+
+;; ── Animations ───────────────────────────────────────────────────────────────
+
+;; (svg-animate buf id attr-name dur values repeat-count)
+(defmacro svg-animate (buf id attr-name dur values repeat-count)
+  (progn
+    (__svg-open-tag buf "animate" id)
+    (__svg-attr-s buf "attributeName" attr-name)
+    (__svg-attr-s buf "dur" dur)
+    (__svg-attr-s buf "values" values)
+    (__svg-attr-s buf "repeatCount" repeat-count)
+    (__svg-close-self buf)))
+
+;; (svg-animate-transform buf id type dur values repeat-count)
+(defmacro svg-animate-transform (buf id type dur values repeat-count)
+  (progn
+    (__svg-open-tag buf "animateTransform" id)
+    (__svg-attr-s buf "attributeName" "transform")
+    (__svg-attr-s buf "type" type)
+    (__svg-attr-s buf "dur" dur)
+    (__svg-attr-s buf "values" values)
+    (__svg-attr-s buf "repeatCount" repeat-count)
+    (__svg-close-self buf)))
+
+;; ── Markers ──────────────────────────────────────────────────────────────────
+
+;; (svg-marker buf id ref-x ref-y orient)
+(defmacro svg-marker (buf id ref-x ref-y orient)
+  (progn
+    (__svg-open-tag buf "marker" id)
+    (__svg-attr-i buf "refX" ref-x)
+    (__svg-attr-i buf "refY" ref-y)
+    (__svg-attr-s buf "orient" orient)
+    (__svg-close-self buf)))
+
+;; (svg-marker-attach buf element-id marker-id end)
+;; end: 0=marker-start, 1=marker-end, 2=marker-mid
+(defmacro svg-marker-attach (buf element-id marker-id end)
+  (progn
+    (__svg-str buf "<!attr ")
+    (__svg-str buf element-id)
+    (if (= end 0)
+      (__svg-str buf " marker-start url(#")
+      (if (= end 1)
+        (__svg-str buf " marker-end url(#")
+        (__svg-str buf " marker-mid url(#")))
+    (__svg-str buf marker-id)
+    (__svg-byte buf 41)   ;; )
+    (__svg-byte buf 62)   ;; >
+    (__svg-byte buf 10)))

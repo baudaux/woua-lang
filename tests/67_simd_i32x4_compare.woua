@@ -1,0 +1,36 @@
+;; @test simd_i32x4_compare
+;; @feature lane-wise comparison operators (=, !=, <s, >s) on :i32x4
+;; Comparison returns a mask: true lane = -1 (all bits set), false lane = 0
+;; a=(1 2 3 4)  b=(1 5 3 4)
+;;   eq: equal at lanes 0,2,3 → -1 0 -1 -1
+;;   ne: different at lane 1  → 0 -1 0 0
+;;   lt: 2<5 at lane 1        → 0 -1 0 0
+;;   gt: nothing in a>b       → 0 0 0 0
+;; @expect
+;;   eq: -1 0 -1 -1
+;;   ne: 0 -1 0 0
+;;   lt: 0 -1 0 0
+;;   gt: 0 0 0 0
+
+(include io)
+(include simd)
+
+(defn main () :void
+  (let a :i32x4 1:2:3:4i32x4
+    (let b :i32x4 1:5:3:4i32x4
+      (let eq :i32x4 (= a b)
+        (let ne :i32x4 (!= a b)
+          (let lt :i32x4 (<s a b)
+            (let gt :i32x4 (>s a b)
+              (printf "eq: %d %d %d %d\n"
+                (extract_lane 0 eq) (extract_lane 1 eq)
+                (extract_lane 2 eq) (extract_lane 3 eq))
+              (printf "ne: %d %d %d %d\n"
+                (extract_lane 0 ne) (extract_lane 1 ne)
+                (extract_lane 2 ne) (extract_lane 3 ne))
+              (printf "lt: %d %d %d %d\n"
+                (extract_lane 0 lt) (extract_lane 1 lt)
+                (extract_lane 2 lt) (extract_lane 3 lt))
+              (printf "gt: %d %d %d %d\n"
+                (extract_lane 0 gt) (extract_lane 1 gt)
+                (extract_lane 2 gt) (extract_lane 3 gt)))))))))

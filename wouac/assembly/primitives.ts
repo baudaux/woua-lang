@@ -51,6 +51,10 @@ export function watI32Load8u(ptr: string): string {
   return "(i32.load8_u " + ptr + ")";
 }
 
+export function watI32Load16u(ptr: string): string {
+  return "(i32.load16_u " + ptr + ")";
+}
+
 export function watI64Store(ptr: string, val: string): string {
   return "(i64.store " + ptr + " " + val + ")";
 }

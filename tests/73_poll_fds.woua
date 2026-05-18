@@ -1,0 +1,53 @@
+;; @test poll_fds
+;; @feature poll-fds, PollSub, PollEvent, array-slot
+;; @stdin hello
+;; @expect
+;;   stdout+stderr both ready
+;;   stdin ready
+;;   got: hello
+
+(include io)
+(include array)
+
+(defn main () :void
+  ;; ── 2-entry call: stdout (fd 1) and stderr (fd 2) — both always writable ──
+  ;; Use array-slot to fill inline PollSub / PollEvent structs cleanly.
+  (let subs2 :*Array (array-new PollSub 2)
+    (let evts2 :*Array (array-new PollEvent 2)
+      ;; reserve two result slots (array-slot advances len and returns :*T)
+      (drop (array-slot PollEvent evts2))
+      (drop (array-slot PollEvent evts2))
+      ;; fill subs: slot 0 = stdout write, slot 1 = stderr write
+      (let s0 :*PollSub (array-slot PollSub subs2)
+        (PollSub/fd!   s0 STDOUT)
+        (PollSub/type! s0 POLL-WRITE))
+      (let s1 :*PollSub (array-slot PollSub subs2)
+        (PollSub/fd!   s1 STDERR)
+        (PollSub/type! s1 POLL-WRITE))
+      ;; 1 ms timeout — both fds should fire immediately
+      (let rc2 :i32 (poll-fds (Array/ptr subs2) 2 1000000i64 (Array/ptr evts2))
+        (let e0 :*PollEvent (array-ptr PollEvent evts2 0)
+          (let e1 :*PollEvent (array-ptr PollEvent evts2 1)
+            (if (and (= rc2 0)
+                     (and (= (PollEvent/ready e0) 1)
+                          (= (PollEvent/ready e1) 1)))
+              (printf "stdout+stderr both ready\n")
+              (printf "unexpected: rc=%d out=%d err=%d\n"
+                      rc2 (PollEvent/ready e0) (PollEvent/ready e1))))))))
+
+  ;; ── 1-entry call: stdin (fd 0), block until readable ──────────────────────
+  (let subs1 :*Array (array-new PollSub 1)
+    (let evts1 :*Array (array-new PollEvent 1)
+      (drop (array-slot PollEvent evts1))
+      (let s :*PollSub (array-slot PollSub subs1)
+        (PollSub/fd!   s STDIN)
+        (PollSub/type! s POLL-READ))
+      (let rc1 :i32 (poll-fds (Array/ptr subs1) 1 -1i64 (Array/ptr evts1))
+        (let e :*PollEvent (array-ptr PollEvent evts1 0)
+          (if (and (= rc1 0) (= (PollEvent/ready e) 1))
+            (progn
+              (printf "stdin ready\n")
+              (let buf :ptr (alloc 256)
+                (let line :str (read-line STDIN buf 255)
+                  (printf "got: %s\n" line))))
+            (printf "stdin poll failed: rc=%d ready=%d\n" rc1 (PollEvent/ready e))))))))

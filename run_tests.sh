@@ -151,49 +151,75 @@ for src in "$TESTS"/*.woua; do
   expect_exit="$(awk '/^;; @expect-exit / { print substr($0, 17); exit }' "$src")"
   expect_exit="${expect_exit:-0}"
 
+  # Parse optional @dir annotations — ;; @dir <path> mounts a preopened WASI directory.
+  # Paths are relative to $REPO; tests are run from $REPO so they resolve correctly.
+  # Example: ;; @dir tmp  →  --dir=tmp  (guest preopen name = "tmp")
+  dir_flags=""
+  while IFS= read -r dir; do
+    dir_flags="$dir_flags --dir=$dir"
+  done < <(awk '/^;; @dir / { print substr($0, 9) }' "$src")
+
+  # Parse optional @stdin annotation — ;; @stdin <text> pipes <text>\n to program stdin.
+  # A bare ;; @stdin (no value) pipes a single newline.  Multiple lines are piped in order.
+  stdin_data=""
+  has_stdin=0
+  while IFS= read -r sline; do
+    stdin_data="${stdin_data}${sline}"$'\n'
+    has_stdin=1
+  done < <(awk '/^;; @stdin$/ { print ""; next } /^;; @stdin / { print substr($0, 11) }' "$src")
+
+  # Helper: run command with or without piped stdin
+  run_wasm() {
+    if [ "$has_stdin" -eq 1 ]; then
+      printf '%s' "$stdin_data" | "$@"
+    else
+      "$@"
+    fi
+  }
+
   # Run and capture output (stdout normally, stderr when non-zero exit expected)
   if [ -n "$extra_args" ]; then
     if [ "$runtime" = "wasmer" ]; then
-      vcmd "wasmer run $wasm_file -- $extra_args"
+      vcmd "wasmer run $dir_flags $wasm_file -- $extra_args"
       # shellcheck disable=SC2086
       set +e
       if [ "$expect_exit" != "0" ]; then
-        actual="$(wasmer run "$wasm_file" -- $extra_args 2>&1 >/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmer run $dir_flags "$wasm_file" -- $extra_args 2>&1 >/dev/null)"
       else
-        actual="$(wasmer run "$wasm_file" -- $extra_args 2>/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmer run $dir_flags "$wasm_file" -- $extra_args 2>/dev/null)"
       fi
       actual_exit=$?
       set -e
     else
-      vcmd "wasmtime run $wasm_file $extra_args"
+      vcmd "wasmtime run $dir_flags $wasm_file $extra_args"
       # shellcheck disable=SC2086
       set +e
       if [ "$expect_exit" != "0" ]; then
-        actual="$(wasmtime run "$wasm_file" $extra_args 2>&1 >/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmtime run $dir_flags "$wasm_file" $extra_args 2>&1 >/dev/null)"
       else
-        actual="$(wasmtime run "$wasm_file" $extra_args 2>/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmtime run $dir_flags "$wasm_file" $extra_args 2>/dev/null)"
       fi
       actual_exit=$?
       set -e
     fi
   else
     if [ "$runtime" = "wasmer" ]; then
-      vcmd "wasmer run $wasm_file"
+      vcmd "wasmer run $dir_flags $wasm_file"
       set +e
       if [ "$expect_exit" != "0" ]; then
-        actual="$(wasmer run "$wasm_file" 2>&1 >/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmer run $dir_flags "$wasm_file" 2>&1 >/dev/null)"
       else
-        actual="$(wasmer run "$wasm_file" 2>/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmer run $dir_flags "$wasm_file" 2>/dev/null)"
       fi
       actual_exit=$?
       set -e
     else
-      vcmd "wasmtime $wasm_file"
+      vcmd "wasmtime $dir_flags $wasm_file"
       set +e
       if [ "$expect_exit" != "0" ]; then
-        actual="$(wasmtime "$wasm_file" 2>&1 >/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmtime $dir_flags "$wasm_file" 2>&1 >/dev/null)"
       else
-        actual="$(wasmtime "$wasm_file" 2>/dev/null)"
+        actual="$(cd "$REPO" && run_wasm wasmtime $dir_flags "$wasm_file" 2>/dev/null)"
       fi
       actual_exit=$?
       set -e

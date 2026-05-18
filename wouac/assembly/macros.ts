@@ -3,7 +3,7 @@
 // Macros either update env (pure compile-time) or return a WAT expression.
 
 import { Node, ListNode, SymbolNode, StringNode, IntNode, FloatNode,
-         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_STRING, TAG_LIST } from "./ast";
+         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_STRING, TAG_LIST, TAG_COMMENT } from "./ast";
 import { Env, StaticInfo, TypeInfo, FieldInfo } from "./env";
 import {
   watI32Const, watF32Const, watF64Const,
@@ -156,6 +156,7 @@ export function expandDeftype(args: Array<Node>, env: Env): string {
   let   offset: i32 = 0;
 
   for (let i = 1; i < args.length; i++) {
+    if (args[i].tag == TAG_COMMENT) continue; // skip inline comments
     const fieldDef  = args[i] as ListNode;
     const fieldName = (fieldDef.children[0] as SymbolNode).name;
     const fieldType = (fieldDef.children[1] as SymbolNode).name;

@@ -1,0 +1,84 @@
+;; @test io_file_ops
+;; @feature create-file, pwrite, pread, file-size, stat-fd, close-file,
+;;   stat-path, rename-file, remove-file, make-dir, remove-dir,
+;;   resolve-path splits a single path into preopen fd + relative sub-path
+;; @dir tmp
+;; @expect
+;;   create ok
+;;   wrote 5
+;;   size=5
+;;   hello
+;;   filetype=4
+;;   close ok
+;;   stat-path ok
+;;   rename ok
+;;   remove ok
+;;   mkdir ok
+
+(include io)
+
+(defn main () :void
+  ;; cleanup leftovers from any previous failed run (ignore errors)
+  (drop (remove-file "tmp/test71b.txt"))
+  (drop (remove-dir  "tmp/test71dir"))
+
+  ;; create (or truncate) the test file — single path, no split needed
+  (let fd :i32 (create-file "tmp/test71.txt")
+    (if (< fd 0)
+      (printf "create failed: %d\n" fd)
+      (progn
+        (printf "create ok\n")
+
+        ;; pwrite "hello" at offset 0
+        (let msg :ptr (alloc 5)
+          (i32.store8 msg         104)   ;; 'h'
+          (i32.store8 (+ msg 1)   101)   ;; 'e'
+          (i32.store8 (+ msg 2)   108)   ;; 'l'
+          (i32.store8 (+ msg 3)   108)   ;; 'l'
+          (i32.store8 (+ msg 4)   111)   ;; 'o'
+          (let nw :i32 (pwrite fd msg 5 0i64)
+            (printf "wrote %d\n" nw)))
+
+        ;; file-size
+        (let sz :i64 (file-size fd)
+          (printf "size=%ld\n" sz))
+
+        ;; pread back at offset 0
+        (let rbuf :ptr (alloc 6)
+          (let nr :i32 (pread fd rbuf 5 0i64)
+            (write STDOUT rbuf nr)
+            (printf "\n")))
+
+        ;; stat-fd — filetype=4 means regular file
+        (let s :*FileStat (stat-fd fd)
+          (printf "filetype=%d\n" (as :i32 (FileStat/filetype s))))
+
+        ;; close
+        (close-file fd)
+        (printf "close ok\n")
+
+        ;; stat-path with full path — resolve-path strips the "tmp/" prefix
+        (let s2 :*FileStat (stat-path "tmp/test71.txt")
+          (if (= (as :i32 (FileStat/filetype s2)) 4)
+            (printf "stat-path ok\n")
+            (printf "stat-path filetype=%d\n" (as :i32 (FileStat/filetype s2)))))
+
+        ;; rename — both paths resolved independently
+        (let re :i32 (rename-file "tmp/test71.txt" "tmp/test71b.txt")
+          (if (= re 0)
+            (printf "rename ok\n")
+            (printf "rename failed: %d\n" re)))
+
+        ;; remove
+        (let rm :i32 (remove-file "tmp/test71b.txt")
+          (if (= rm 0)
+            (printf "remove ok\n")
+            (printf "remove failed: %d\n" rm)))
+
+        ;; make-dir then immediately remove-dir
+        (let md :i32 (make-dir "tmp/test71dir")
+          (if (= md 0)
+            (progn
+              (printf "mkdir ok\n")
+              (drop (remove-dir "tmp/test71dir")))
+            (printf "mkdir failed: %d\n" md)))))))

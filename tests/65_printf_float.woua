@@ -1,0 +1,15 @@
+;; @test printf_float
+;; @feature %f and %lf format specifiers in printf (%f → f32, %lf → f64)
+;; @expect
+;;   1.500000
+;;   -2.500000
+;;   0.000000
+;;   3.140000
+
+(include io)
+
+(defn main ()
+  (printf "%f\n" 1.5)        ;; f32: exact, "1.500000"
+  (printf "%f\n" -2.5)       ;; f32 negative: exact, "-2.500000"
+  (printf "%f\n" 0.0)        ;; f32 zero: "0.000000"
+  (printf "%lf\n" 3.14f64))  ;; f64: "3.140000"

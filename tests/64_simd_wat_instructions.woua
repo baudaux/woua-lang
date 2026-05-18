@@ -1,0 +1,19 @@
+;; @test simd_wat_instructions
+;; @feature verify that SIMD defops emit native WAT instructions (not function calls)
+;; @expect-wat i32x4.add
+;; @expect-wat extract_lane 0
+;; @expect-wat f32x4.splat
+;; @expect-wat v128.const
+;; @expect-wat v128.and
+;; @expect-wat i32x4.mul
+
+(include simd)
+
+(defn main () :void
+  (let z :i32x4 0i32x4
+    (let a :i32x4 1:2:3:4i32x4
+      (let b :i32x4 5:6:7:8i32x4
+        (drop (extract_lane 0 (+ a b)))
+        (drop (extract_lane 0 (* a b)))
+        (drop (f32x4-splat 1.0))
+        (drop (v-and a b))))))

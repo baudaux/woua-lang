@@ -2,6 +2,23 @@
 
 ## High priority
 
+- [x] #63 SIMD vector literals — `v128.const` is too verbose and low-level; design a friendlier syntax
+  - Preferred style: colon-separated lane values with the type as a bare suffix (no leading `:`), e.g. `1:2:3:4i32x4`, `1.0:2.0:3.0:4.0f32x4`, `0:1:2:3:4:5:6:7:8:9:10:11:12:13:14:15i8x16`
+  - Consistent with existing suffix literals like `42i64` — type tag comes last, no leading colon
+  - Splat shorthand: `5i32x4` (single value, no colons) broadcasts to all lanes
+  - Expands directly to WAT's native typed form: `1:2:3:4i32x4` → `v128.const i32x4 1 2 3 4`, `1.0:2.0:3.0:4.0f32x4` → `v128.const f32x4 1.0 2.0 3.0 4.0`
+  - WAT supports all lane interpretations: `i8x16`, `i16x8`, `i32x4`, `i64x2`, `f32x4`, `f64x2`
+  - Requires a new `TAG_V128` AST node (lane type + values) since `defliteral` only handles single Int/Float values
+  - The current `(v128.const b0 b1 … b15)` 16-byte i8x16 form stays as a low-level escape hatch
+
+- [x] #62 SIMD support — expose WebAssembly SIMD (128-bit vector) instructions as first-class operations in woua
+  - Add `:v128` as a primitive type recognized by `watType`, `sizeOf`, `alignOf`
+  - Add `defop` entries in `lib/core.woua` (or a new `lib/simd.woua`) for the main SIMD opcodes: `v128.load`, `v128.store`, `i8x16.splat`, `i16x8.splat`, `i32x4.splat`, `i64x2.splat`, `f32x4.splat`, `f64x2.splat`, lane-wise add/sub/mul (`i32x4.add`, `f32x4.add`, …), shuffle (`i8x16.shuffle`), and comparisons
+  - SIMD literals: `(v128 0x00 0x01 … 0x0f)` — 16-byte constant encoded as a `v128.const` immediate
+  - `(v128.load ptr)` / `(v128.store ptr val)` macros wrapping the typed memory instructions
+  - Add a `demos/simd.woua` demo (e.g. dot-product of two f32x4 vectors)
+  - Requires the target runtime / `wasm-opt` to have the SIMD proposal enabled (`--enable-simd`)
+
 - [x] #01 Error reporting — display a useful message (file, line, column, description) when the input file has a syntax or semantic error, instead of silently failing or crashing
 - [x] #02 WASI file I/O — investigate and fix issues with opening files and preopened directories; WASI requires enumerating preopened fds via `fd_prestat_get` / `fd_prestat_dir_name` before calling `path_open`; add helpers in `lib/wasi_p1.woua` and a demo
 - [x] #03 Command-line arguments — expose `args_sizes_get` + `args_get` from WASI as helpers in `lib/io.woua`; provide `(args-count)` and `(args-get i buf)` macros so programs can read `argv`
@@ -18,6 +35,7 @@
 - [ ] #08 `sprintf` — like `printf` but writes into a `str` buffer instead of stdout; enables building strings at runtime
 - [x] #09 Numeric conversions — superseded by `(as :Type expr)` which handles all i32↔i64↔f32↔f64 casts with a single unified form (test 11)
 - [ ] #10 `%x` / `%X` in `printf` — hexadecimal output specifier in `lib/io.woua`
+- [x] #65 `%f` / `%lf` in `printf` — float formatting specifiers; requires a runtime f32/f64→string conversion (e.g. Grisu or ryu-style) since WASM has no built-in float-to-decimal; `%f` → `:f32`, `%lf` → `:f64`
 - [x] #11 `printf` generated functions
 - [ ] #12 Tail call optimization — emit `return_call` / `return_call_indirect` WAT instructions for self-tail-calls and mutual tail-calls; mandatory for recursive woua code to be safe at depth (the current `printf-impl` is already a recursive macro, but user `defn` functions risk stack overflow without TCO)
 - [x] #13 Operator overloading for user-defined types — allow `defop` to reference a `defn` name instead of a WAT opcode; e.g. `(defop + "Point_add" (:Point :Point) :Point)` dispatches to `(call $Point_add ...)`; `resolveOp` already handles multiple overloads per operator, only the codegen emit path needs extending
@@ -28,6 +46,7 @@
 
 ## Medium priority
 
+- [x] #66 `lib/math.woua` — math function library: `sin`, `cos`, `sqrt`, `floor`, `ceil`, `round`, `pow`, `log`, `exp`; backed by WASM's built-in `f32.sqrt`/`f64.sqrt` where available, and WASI `wasi:math` imports or a software fallback for the rest; prerequisite for FFT twiddle factors and any numeric demo
 - [x] #14 First-class functions — pass and store functions as values using WAT function tables + `call_indirect`
   - Function type syntax: `(:i32 -> :i32)` for a function taking one i32 and returning one i32
   - `(defn apply (f (:i32 -> :i32) x :i32) (f x))` — function as parameter
@@ -88,8 +107,10 @@
   - [x] `(i64->str n)` → `:str` — already done
   - [ ] `(str->i32 s :str)` → `:i32` — parse decimal string (replaces old #29)
   - [ ] `(str->i64 s :str)` → `:i64` — parse decimal string to i64
-  - [ ] `(f32->str x :f32 prec :i32)` → `:str` — f32 to decimal with given precision
-  - [ ] `(f64->str x :f64 prec :i32)` → `:str` — f64 to decimal with given precision
+  - [x] `(f32->str f :f32)` → `:str` — done (fixed 6 decimal places; no precision param yet)
+  - [x] `(f64->str f :f64)` → `:str` — done (fixed 6 decimal places; no precision param yet)
+  - [ ] `(f32->str x :f32 prec :i32)` → `:str` — f32 to decimal with configurable precision
+  - [ ] `(f64->str x :f64 prec :i32)` → `:str` — f64 to decimal with configurable precision
   - [ ] `(str->f32 s :str)` → `:f32` — parse float from string
   - [ ] `(str->f64 s :str)` → `:f64` — parse float from string
 - [ ] #30 `string-trim` in `lib/string.woua` — strip leading/trailing whitespace bytes
@@ -106,7 +127,7 @@
   - Add a `demos/bench.woua` demo that times a simple loop using `time-now-ms`
 - [ ] #36 `random_get` — entropy from the host via WASI; needed for hashing, UUIDs, random number generation
 - [ ] #37 Environment variables — expose `environ_sizes_get` + `environ_get` from WASI; add `(env-get "VAR" buf)` helper in `lib/wasi_p1.woua`
-- [ ] #46 Missing WASI Preview 1 functions — add `defimport` declarations in `lib/wasi_p1.woua` for the functions not yet covered:
+- [x] #46 Missing WASI Preview 1 functions — add `defimport` declarations in `lib/wasi_p1.woua` for the functions not yet covered:
   - **File descriptors**: `fd_advise`, `fd_allocate`, `fd_datasync`, `fd_fdstat_get`, `fd_fdstat_set_flags`, `fd_filestat_get`, `fd_filestat_set_size`, `fd_filestat_set_times`, `fd_pread`, `fd_pwrite`, `fd_readdir`
   - **Paths**: `path_filestat_get`, `path_filestat_set_times`, `path_link`, `path_readlink`, `path_remove_directory`, `path_symlink`
   - **Sockets**: `sock_accept`, `sock_recv`, `sock_send`, `sock_shutdown`
@@ -140,4 +161,65 @@
   - Could compile to nested `if` + let-bindings for destructuring
   - Depends on tuples (#26) and protocols (#52) for type-based dispatch
 
+- [x] #67 `bench/` — benchmark suite comparing woua (via `wasmtime`) against native Rust; each benchmark has a `.woua` source and an equivalent `bench_NAME.rs`; a `run_bench.sh` driver runs both, prints side-by-side wall-clock times (`time-now-ns` from `lib/time.woua` for woua, `std::time::Instant` for Rust), and emits a ratio
+  - **`bench/fib.woua`** — recursive Fibonacci `fib(40)`: integer recursion, no allocation; classic baseline
+  - **`bench/sum.woua`** — sum 100 M integers in a loop: tight loop, pure i64 arithmetic; tests loop overhead vs LLVM -O3
+  - **`bench/sieve.woua`** — Sieve of Eratosthenes up to 1 M: array reads/writes, branch-heavy inner loop; tests memory access patterns
+  - **`bench/matmul.woua`** — 256×256 f64 matrix multiply: floating-point throughput; prerequisite for SIMD matmul follow-up
+  - **`bench/fft.woua`** — 4096-point Cooley-Tukey FFT using `lib/math.woua` (`sin`/`cos`/`exp`): complex arithmetic, divide-and-conquer; tests the math library end-to-end
+  - **`bench/simd_dot.woua`** — dot product of two 1024-element f32 arrays using `f32x4.mul` + `f32x4.add`: SIMD throughput vs scalar Rust; requires `lib/simd.woua`
+  - Rust equivalents compiled with `rustc -O` or `cargo build --release`; wasmtime run with `--wasm simd` where needed
+  - Expected outcome: wasmtime/woua within ~1.5–2× of native Rust for compute-bound kernels; larger gaps expose missing optimisations
+
+- [x] #68 SVG rendering — draw 2-D graphics from woua programs by writing incremental SVG commands to `/dev/svg`, a virtual device file provided by the host environment
+  - **Protocol**: each `write` to `/dev/svg` carries one or more SVG element fragments; the JS bridge applies them incrementally to the DOM using upsert-by-id — if an element with the given `id` already exists its attributes are updated in place, otherwise a new child element is inserted into the `<svg>` container; this enables both static scenes and live animation without full redraws
+  - **`SvgBuf` deftype** — `(ptr :ptr) (len :i32) (cap :i32)`; all commands take a `:*SvgBuf` and update `len` in place; the caller passes `(SvgBuf/ptr buf)` and `(SvgBuf/len buf)` to `write`; eliminates manual write-cursor tracking
+  - **`lib/svg.woua`** — woua-side library that serialises drawing commands into a linear-memory byte buffer:
+    - `(svg-begin buf cap)` — allocate a `SvgBuf` wrapping `buf`/`cap` and zero the write position
+    - `(svg-line      buf id x1 y1 x2 y2 color stroke-w)` — append a `<line id="...">` element
+    - `(svg-rect      buf id x y w h color stroke-color stroke-w)` — append a `<rect id="...">` element
+    - `(svg-circle    buf id cx cy r color stroke-color stroke-w)` — append a `<circle id="...">` element
+    - `(svg-text      buf id x y text color)` — append a `<text id="...">` element using a runtime `:str`
+    - `(svg-path      buf id d color stroke-color stroke-w)` — append a `<path id="...">` element with a raw SVG path data string
+    - `(svg-group     buf id transform)` — open a `<g id="..." transform="...">` container; `transform` is a raw SVG transform string (e.g. `"translate(10,20) rotate(45)"`) or empty `:str` for none
+    - `(svg-group-end buf)` — close the current `</g>`
+    - `(svg-parent    buf group-id)` — set the insertion parent for all subsequent element commands to the group with `group-id`; `(svg-parent buf "")` resets to the `<svg>` root; this allows adding elements to an existing group in a later batch without reopening a `svg-group`/`svg-group-end` block
+    - `(svg-transform buf id transform)` — set the `transform` attribute on element `id`; sent alone to reposition/rotate an existing element without redrawing it
+    - `(svg-style     buf id style)` — set the `style` attribute on element `id`; `style` is a raw CSS string (e.g. `"font-size:14px;font-weight:bold;opacity:0.8"`); works on any element type
+    - `(svg-remove    buf id)` — emit a remove directive for element `id`; the JS bridge deletes the matching DOM element
+    - `(svg-clear     buf)` — emit a clear directive; the JS bridge removes all children from the `<svg>` container
+    - **Gradients**:
+      - `(svg-linear-gradient buf id x1 y1 x2 y2)` — define a `<linearGradient>`; coordinates are in `userSpaceOnUse` units
+      - `(svg-radial-gradient buf id cx cy r)` — define a `<radialGradient>`
+      - `(svg-gradient-stop buf grad-id offset color opacity)` — add a `<stop>` to an existing gradient; `offset` is 0–100 (percent), `opacity` is 0–100
+      - Gradients are defined once in `<defs>` and referenced by id in `color` or `stroke-color` fields as `"url(#grad-id)"`
+    - **Clip paths**:
+      - `(svg-clip-begin buf id)` — open a `<clipPath id="...">` in `<defs>`
+      - `(svg-clip-end   buf)` — close the `</clipPath>`
+      - `(svg-clip       buf id clip-id)` — set `clip-path="url(#clip-id)"` on element `id`
+    - **Animation**:
+      - `(svg-animate     buf elem-id attr from to dur-ms repeat)` — append an `<animate>` child to element `elem-id` that interpolates `attr` from `from` to `to` over `dur-ms` milliseconds; `repeat` is `"indefinite"` or a count as `:str`
+      - `(svg-animate-transform buf elem-id type from to dur-ms repeat)` — append an `<animateTransform>` for `transform` attribute; `type` is `"translate"`, `"rotate"`, `"scale"`, etc.
+      - `(svg-animate-stop buf elem-id)` — remove all `<animate>` children of element `elem-id` to stop its animation
+    - **Additional shapes**:
+      - `(svg-ellipse  buf id cx cy rx ry color stroke-color stroke-w)` — `<ellipse>` with independent x/y radii
+      - `(svg-polygon  buf id points color stroke-color stroke-w)` — `<polygon>` closed shape; `points` is an SVG point-list string (e.g. `"0,0 50,100 100,0"`)
+      - `(svg-polyline buf id points color stroke-color stroke-w)` — `<polyline>` open path; same `points` format
+    - **Markers** (arrowheads, dots on line endpoints):
+      - `(svg-marker-begin buf id width height)` — open a `<marker id="..." ...>` in `<defs>`; `width`/`height` set `markerWidth`/`markerHeight`
+      - `(svg-marker-end   buf)` — close the `</marker>`; any shape commands between `svg-marker-begin` and `svg-marker-end` define the marker graphic
+      - `(svg-marker-attach buf elem-id start-marker-id end-marker-id)` — set `marker-start` and/or `marker-end` on element `elem-id`; pass empty `:str` to omit either end
+    - **viewBox**: `mountSvg(wasmImports, selector, width, height, viewBox)` — `viewBox` is an optional string (e.g. `"0 0 100 100"`) for resolution-independent scaling; pass `""` to default to `"0 0 width height"`
+    - All coordinates are `:i32` (pixel units); colors are `#RRGGBB` format passed as `:str`; `id` is a `:str`
+    - Commands are serialised as ASCII SVG element strings directly into the buffer (no intermediate AST)
+    - To send: open `/dev/svg` with `open-file`, `write` `(SvgBuf/len buf)` bytes from `(SvgBuf/ptr buf)`, close the fd
+  - **`js/svg-bridge.js`** — JavaScript host-side module that exposes `/dev/svg` as a WASI preopened virtual device:
+    - `mountSvg(wasmImports, selector, width, height)` — injects the virtual device into the WASI imports object and sets the `<svg>` container dimensions; call before `WebAssembly.instantiate`
+    - Intercepts `fd_write` calls on the `/dev/svg` fd; parses each received fragment as one or more directives
+    - **Upsert**: element fragment with known `id` → `setAttribute` on existing DOM node; unknown id → `appendChild` new element
+    - **Transform / style**: attribute-only directives → `setAttribute` on the target element
+    - **Remove**: remove directive → `removeChild` on the matching element
+    - **Clear**: clear directive → remove all children from the `<svg>` container
+    - Plugs into the WASI imports object passed to `WebAssembly.instantiate`; no changes to the woua runtime
+  - **`demos/svg_demo.woua`** — demo that draws an animated scene: initial shapes sent once, then a loop updates positions by resending only the changed elements (same ids, new coordinates)
 

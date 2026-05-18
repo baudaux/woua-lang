@@ -4,6 +4,11 @@
 (include wasi_p1)
 (include string)
 
+;; Standard file descriptors
+(defconst STDIN  0)
+(defconst STDOUT 1)
+(defconst STDERR 2)
+
 ;; Iovec: WASI scatter/gather I/O vector (wasi_ciovec_t layout).
 ;; An extra 4-byte nwritten slot is allocated after the struct at runtime.
 (deftype Iovec
@@ -36,6 +41,14 @@
 ;; print-int64: convert an i64 to str and print it to stdout.
 (defmacro print-int64 (n)
   (print-string (i64->str n)))
+
+;; print-float: convert an f32 to str and print it to stdout.
+(defmacro print-float (f)
+  (print-string (f32->str f)))
+
+;; print-float64: convert an f64 to str and print it to stdout.
+(defmacro print-float64 (f)
+  (print-string (f64->str f)))
 
 ;; print-char: print a single byte value as a character to stdout.
 (defmacro print-char (c)
@@ -86,10 +99,17 @@
             (macro-if (= (string-byte-at fmt (+ pos 1)) 99)
               (macro-seq (print-char   (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
               (macro-if (= (string-byte-at fmt (+ pos 1)) 108)
-                ;; '%l...' → i64 (treats %ld, %li, %l? all as print-int64, advance 3)
-                (macro-seq (print-int64  (macro-first alist)) (printf-impl fmt (+ pos 3) (macro-rest alist)))
-                ;; '%x' unknown or '%%' → print '%', advance 2
-                (macro-seq (print-char 37) (printf-impl fmt (+ pos 2) alist)))))))
+                ;; '%l...' — distinguish %lf (f64) from %ld/%li (i64)
+                (macro-if (= (string-byte-at fmt (+ pos 2)) 102)
+                  ;; '%lf' → print-float64 (f64), advance 3
+                  (macro-seq (print-float64 (macro-first alist)) (printf-impl fmt (+ pos 3) (macro-rest alist)))
+                  ;; '%ld', '%li', etc. → print-int64 (i64), advance 3
+                  (macro-seq (print-int64   (macro-first alist)) (printf-impl fmt (+ pos 3) (macro-rest alist))))
+                (macro-if (= (string-byte-at fmt (+ pos 1)) 102)
+                  ;; '%f' → print-float (f32), advance 2
+                  (macro-seq (print-float   (macro-first alist)) (printf-impl fmt (+ pos 2) (macro-rest alist)))
+                  ;; '%%' or unknown → print '%', advance 2, do not consume arg
+                  (macro-seq (print-char 37) (printf-impl fmt (+ pos 2) alist))))))))
       ;; Regular character at pos — print it and advance
       (macro-seq
         (print-char (string-byte-at fmt pos))
@@ -161,10 +181,9 @@
 ;; Preopens are assigned fds starting at 3 (after stdin/stdout/stderr).
 ;; fd_prestat_get returns EBADF (8) when fd has no preopen — end of scan.
 ;;
-;; (find-preopen name buf buf-len)  → fd (i32, -1 if not found)
-;; Scans preopened fds starting at 3.  For each one, reads the directory name
-;; into buf and compares it byte-by-byte against name.
-;; Returns the matching fd, or -1 if none matches.
+;; (find-preopen name buf buf-len) → fd (i32, -1 if not found)
+;; Low-level helper: finds the preopen fd whose name equals name exactly.
+;; Kept for callers that have already split dir/path themselves.
 (defn find-preopen (name :str buf :ptr buf-len :i32)
   (let name-ptr :ptr (str/ptr name)
     (let name-len :i32 (str/len name)
@@ -199,11 +218,95 @@
                     (set! stop 1))))
               result)))))))
 
+;; ResolvedPath — result of resolve-path.
+;; fd:   the matching preopen fd, or -1 if no preopen covers path.
+;; rptr: pointer into the original string at the start of the relative sub-path.
+;; rlen: byte length of the relative sub-path.
+(deftype ResolvedPath
+  (fd   :i32)
+  (rptr :ptr)
+  (rlen :i32))
+
+;; (resolve-path path scratch scratch-len) → :*ResolvedPath
+;; Split a full path into a WASI preopen fd and the relative sub-path.
+;; Matching rules (first matching preopen wins):
+;;   preopen is "."              → rel = path entirely
+;;   path starts with "PNAME/"   → rel = path after the slash
+;;   path == "PNAME"             → rel = "." (written into scratch)
+;; If no preopen matches, fd = -1 and rel = path (pass-through).
+;; scratch must be at least as large as the longest preopen name (256 bytes safe).
+(defn resolve-path (path :str scratch :ptr scratch-len :i32) :*ResolvedPath
+  (let path-ptr :ptr (str/ptr path)
+    (let path-len :i32 (str/len path)
+      (let prestat :ptr (alloc 8)
+        (let res :*ResolvedPath (alloc (sizeof ResolvedPath))
+          (ResolvedPath/fd!   res -1)
+          (ResolvedPath/rptr! res path-ptr)
+          (ResolvedPath/rlen! res path-len)
+          (let fd   :i32 3
+            (let stop :i32 0
+              (while (= stop 0)
+                (let errno :i32 (fd_prestat_get fd prestat)
+                  (if (= errno 0)
+                    (let name-len :i32 (i32.load (+ prestat 4))
+                      (if (<= name-len scratch-len)
+                        (progn
+                          (drop (fd_prestat_dir_name fd scratch name-len))
+                          (if (and (= name-len 1) (= (i32.load8_u scratch) 46))
+                            ;; preopen is "." — matches everything; lowest priority
+                            ;; only use it if nothing better was found yet
+                            (if (= (ResolvedPath/fd res) -1)
+                              (progn
+                                (ResolvedPath/fd!   res fd)
+                                (ResolvedPath/rptr! res path-ptr)
+                                (ResolvedPath/rlen! res path-len)
+                                (set! fd (+ fd 1)))
+                              (set! fd (+ fd 1)))
+                            ;; compare bytes of preopen name against path prefix
+                            (if (and (>= path-len (+ name-len 1))
+                                     (= (i32.load8_u (+ path-ptr name-len)) 47))
+                              ;; path starts with "name/" — check each byte
+                              (let i     :i32 0
+                                (let match :i32 1
+                                  (while (< i name-len)
+                                    (if (= (i32.load8_u (+ path-ptr i))
+                                           (i32.load8_u (+ scratch i)))
+                                      (set! i (+ i 1))
+                                      (progn (set! match 0) (set! i name-len))))
+                                  (if match
+                                    (progn
+                                      (ResolvedPath/fd!   res fd)
+                                      (ResolvedPath/rptr! res (+ path-ptr (+ name-len 1)))
+                                      (ResolvedPath/rlen! res (- path-len (+ name-len 1)))
+                                      (set! stop 1))
+                                    (set! fd (+ fd 1)))))
+                              ;; check if path == preopen name exactly
+                              (if (= path-len name-len)
+                                (let i     :i32 0
+                                  (let match :i32 1
+                                    (while (< i name-len)
+                                      (if (= (i32.load8_u (+ path-ptr i))
+                                             (i32.load8_u (+ scratch i)))
+                                        (set! i (+ i 1))
+                                        (progn (set! match 0) (set! i name-len))))
+                                    (if match
+                                      (progn
+                                        ;; relative path is "." — write into scratch
+                                        (i32.store8 scratch 46)
+                                        (ResolvedPath/fd!   res fd)
+                                        (ResolvedPath/rptr! res scratch)
+                                        (ResolvedPath/rlen! res 1)
+                                        (set! stop 1))
+                                      (set! fd (+ fd 1)))))
+                                (set! fd (+ fd 1))))))
+                        (set! fd (+ fd 1))))
+                    (set! stop 1)))))
+          res))))))
+
 ;; (open-file-at dirfd path readonly) → fd (i32, negative = errno)
-;; Opens path relative to dirfd (a preopened directory fd).
-;;   readonly = 1  → rights: FD_READ | FD_SEEK | FD_TELL  (2|4|32 = 38)
-;;   readonly = 0  → above + FD_DATASYNC | FD_SYNC | FD_WRITE (1|16|64 = 81, total 119)
-;; Returns the new fd on success, or a negative WASI errno on failure.
+;; Low-level: open path relative to an already-known preopen dirfd.
+;;   readonly = 1 → rights: FD_READ | FD_SEEK | FD_TELL  (2|4|32 = 38)
+;;   readonly = 0 → above + FD_DATASYNC | FD_SYNC | FD_WRITE (1|16|64 = 81, total 119)
 (defn open-file-at (dirfd :i32 path :str readonly :i32)
   (let fd-out :ptr (alloc 4)
     (let rights :i64 (if readonly 38i64 119i64)
@@ -212,14 +315,385 @@
           (i32.load fd-out)
           (* -1 err))))))
 
-;; (open-file dir path readonly) → fd (i32, negative on error)
-;; High-level helper: locates the preopened fd whose name matches dir,
-;; then opens path relative to it.
-;; Returns the new fd on success, -1 if the preopen was not found, or a negative
-;; WASI errno if path_open failed.
-(defn open-file (dir :str path :str readonly :i32)
+;; (open-file path readonly) → fd (i32, negative on error)
+;; Open path, splitting off the preopen prefix automatically.
+;; e.g. (open-file "tmp/data.txt" 1) opens "data.txt" relative to the "tmp" preopen.
+(defn open-file (path :str readonly :i32)
   (let scratch :ptr (alloc 256)
-    (let dirfd :i32 (find-preopen dir scratch 256)
-      (if (= dirfd -1)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (if (= (ResolvedPath/fd r) -1)
         -1
-        (open-file-at dirfd path readonly)))))
+        (let rel :str (values (ResolvedPath/rptr r) (ResolvedPath/rlen r))
+          (open-file-at (ResolvedPath/fd r) rel readonly))))))
+
+;; (create-file-at dirfd path) → fd (i32, negative = errno)
+;; Low-level: create/truncate path relative to an already-known preopen dirfd.
+(defn create-file-at (dirfd :i32 path :str)
+  (let fd-out :ptr (alloc 4)
+    (let err :i32 (path_open dirfd 1 (str/ptr path) (str/len path) 9 119i64 119i64 0 fd-out)
+      (if (= err 0)
+        (i32.load fd-out)
+        (* -1 err)))))
+
+;; (create-file path) → fd (i32, negative on error)
+;; Create or truncate path, splitting off the preopen prefix automatically.
+(defn create-file (path :str)
+  (let scratch :ptr (alloc 256)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (if (= (ResolvedPath/fd r) -1)
+        -1
+        (let rel :str (values (ResolvedPath/rptr r) (ResolvedPath/rlen r))
+          (create-file-at (ResolvedPath/fd r) rel))))))
+
+;; (close-file fd) — close a file descriptor; discards the errno return value.
+(defmacro close-file (fd)
+  (drop (fd_close fd)))
+
+;; (file-size fd) → :i64 — return the byte size of an open file.
+;; Allocates a 64-byte filestat buffer, calls fd_filestat_get, and reads the
+;; size field (a u64) at byte offset 32.
+(defn file-size (fd :i32) :i64
+  (let stat :ptr (alloc 64)
+    (drop (fd_filestat_get fd stat))
+    (i64.load (+ stat 32))))
+
+;; (pread fd buf len offset) → :i32
+;; Read up to len bytes from fd at absolute byte offset into buf.
+;; Returns the number of bytes actually read.
+(defn pread (fd :i32 buf :ptr len :i32 offset :i64) :i32
+  (let iov   :*Iovec (alloc (+ (sizeof Iovec) 4))
+    (let nread :ptr (+ (as :i32 iov) (sizeof Iovec))
+      (Iovec/base! iov buf)
+      (Iovec/len!  iov len)
+      (drop (fd_pread fd (as :i32 iov) 1 offset nread))
+      (i32.load nread))))
+
+;; (pwrite fd buf len offset) → :i32
+;; Write len bytes from buf to fd at absolute byte offset.
+;; Returns the number of bytes actually written.
+(defn pwrite (fd :i32 buf :ptr len :i32 offset :i64) :i32
+  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
+    (let nwritten :ptr (+ (as :i32 iov) (sizeof Iovec))
+      (Iovec/base! iov buf)
+      (Iovec/len!  iov len)
+      (drop (fd_pwrite fd (as :i32 iov) 1 offset nwritten))
+      (i32.load nwritten))))
+
+;; (remove-file path) → :i32  (0 = ok, non-zero = WASI errno)
+;; Delete path, splitting off the preopen prefix automatically.
+(defn remove-file (path :str) :i32
+  (let scratch :ptr (alloc 256)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (if (= (ResolvedPath/fd r) -1)
+        8
+        (path_unlink_file (ResolvedPath/fd r)
+                          (ResolvedPath/rptr r)
+                          (ResolvedPath/rlen r))))))
+
+;; (make-dir path) → :i32  (0 = ok, non-zero = WASI errno)
+;; Create directory at path, splitting off the preopen prefix automatically.
+(defn make-dir (path :str) :i32
+  (let scratch :ptr (alloc 256)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (if (= (ResolvedPath/fd r) -1)
+        8
+        (path_create_directory (ResolvedPath/fd r)
+                               (ResolvedPath/rptr r)
+                               (ResolvedPath/rlen r))))))
+
+;; (remove-dir path) → :i32  (0 = ok, non-zero = WASI errno)
+;; Remove empty directory at path, splitting off the preopen prefix automatically.
+(defn remove-dir (path :str) :i32
+  (let scratch :ptr (alloc 256)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (if (= (ResolvedPath/fd r) -1)
+        8
+        (path_remove_directory (ResolvedPath/fd r)
+                               (ResolvedPath/rptr r)
+                               (ResolvedPath/rlen r))))))
+
+;; (rename-file src dst) → :i32  (0 = ok, non-zero = WASI errno)
+;; Rename src to dst, resolving each path's preopen independently.
+(defn rename-file (src :str dst :str) :i32
+  (let scratch :ptr (alloc 512)
+    (let rs :*ResolvedPath (resolve-path src scratch 256)
+      (let rd :*ResolvedPath (resolve-path dst (+ scratch 256) 256)
+        (if (or (= (ResolvedPath/fd rs) -1) (= (ResolvedPath/fd rd) -1))
+          8
+          (path_rename (ResolvedPath/fd rs)
+                       (ResolvedPath/rptr rs) (ResolvedPath/rlen rs)
+                       (ResolvedPath/fd rd)
+                       (ResolvedPath/rptr rd) (ResolvedPath/rlen rd)))))))
+
+;; ── File stat ─────────────────────────────────────────────────────────────────
+;; FileStat mirrors the 64-byte wasi_filestat_t layout:
+;;   dev:u64 ino:u64 filetype:u8(+7 pad) nlink:u64 size:u64 atim:u64 mtim:u64 ctim:u64
+;; filetype values: 0=unknown 1=block_device 2=char_device 3=directory
+;;                  4=regular_file 5=socket_dgram 6=socket_stream 7=symlink
+;; filetype is stored as :i64 to cover the u8 + 7 pad bytes; extract with (as :i32 ...).
+(deftype FileStat
+  (dev      :i64)   ;; offset  0 — device id
+  (ino      :i64)   ;; offset  8 — inode number
+  (filetype :i64)   ;; offset 16 — low byte is filetype u8; rest is zero padding
+  (nlink    :i64)   ;; offset 24 — hard link count
+  (size     :i64)   ;; offset 32 — file size in bytes
+  (atim     :i64)   ;; offset 40 — last access time (nanoseconds)
+  (mtim     :i64)   ;; offset 48 — last modification time (nanoseconds)
+  (ctim     :i64))  ;; offset 56 — last status change time (nanoseconds)
+
+;; (stat-fd fd) → :*FileStat
+;; Allocate and fill a FileStat for an already-open file descriptor.
+(defn stat-fd (fd :i32) :*FileStat
+  (let buf :*FileStat (alloc 64)
+    (drop (fd_filestat_get fd (as :i32 buf)))
+    buf))
+
+;; (stat-path path) → :*FileStat
+;; Allocate and fill a FileStat by path, following symlinks.
+;; Splits off the preopen prefix automatically.
+;; Returns a zeroed struct if no preopen matches or the path does not exist.
+(defn stat-path (path :str) :*FileStat
+  (let scratch :ptr (alloc 256)
+    (let r :*ResolvedPath (resolve-path path scratch 256)
+      (let buf :*FileStat (alloc 64)
+        (if (!= (ResolvedPath/fd r) -1)
+          (drop (path_filestat_get (ResolvedPath/fd r) 1
+                                   (ResolvedPath/rptr r) (ResolvedPath/rlen r)
+                                   (as :i32 buf))))
+        buf))))
+
+;; ── Sockets ───────────────────────────────────────────────────────────────────
+;; WASI Preview 1 only supports the server/accept side of connected sockets
+;; (no bind/listen/connect — those require WASIX or the sockets proposal).
+;; The four helpers below wrap the four available syscalls.
+
+;; (sock-accept fd) → :i32
+;; Accept the next incoming connection on listening fd.
+;; Returns the new connection fd on success, or a negative WASI errno on failure.
+(defn sock-accept (fd :i32) :i32
+  (let conn-out :ptr (alloc 4)
+    (let err :i32 (sock_accept fd 0 conn-out)
+      (if (= err 0)
+        (i32.load conn-out)
+        (* -1 err)))))
+
+;; (sock-recv fd buf len) → :i32
+;; Receive up to len bytes from a connected socket fd into buf.
+;; Returns the number of bytes received, or a negative WASI errno on failure.
+(defn sock-recv (fd :i32 buf :ptr len :i32) :i32
+  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
+    (let nread    :ptr (+ (as :i32 iov) (sizeof Iovec))
+      (let ro-flags :ptr (alloc 4)
+        (Iovec/base! iov buf)
+        (Iovec/len!  iov len)
+        (let err :i32 (sock_recv fd (as :i32 iov) 1 0 nread ro-flags)
+          (if (= err 0)
+            (i32.load nread)
+            (* -1 err)))))))
+
+;; (sock-send fd buf len) → :i32
+;; Send len bytes from buf over connected socket fd.
+;; Returns the number of bytes sent, or a negative WASI errno on failure.
+(defn sock-send (fd :i32 buf :ptr len :i32) :i32
+  (let iov       :*Iovec (alloc (+ (sizeof Iovec) 4))
+    (let nwritten  :ptr (+ (as :i32 iov) (sizeof Iovec))
+      (Iovec/base! iov buf)
+      (Iovec/len!  iov len)
+      (let err :i32 (sock_send fd (as :i32 iov) 1 0 nwritten)
+        (if (= err 0)
+          (i32.load nwritten)
+          (* -1 err))))))
+
+;; (sock-shutdown fd how) — shut down part of a socket connection.
+;;   how: 0=read  1=write  2=read+write
+(defmacro sock-shutdown (fd how)
+  (drop (sock_shutdown fd how)))
+
+;; ── poll_oneoff helpers ───────────────────────────────────────────────────────
+;; poll_oneoff is the WASI equivalent of POSIX select/poll.
+;;
+;; Subscription struct layout (48 bytes each):
+;;   offset  0 — userdata    u64  (echoed back in the event; use as a tag)
+;;   offset  8 — tag         u8   0=clock  1=fd_read  2=fd_write
+;;   offset  9 — padding     7 bytes
+;;   offset 16 — union body  32 bytes
+;;     clock  body: clock_id:u32(+4pad) timeout:u64 precision:u64 flags:u16(+6pad)
+;;     fd_rw  body: fd:u32 followed by 28 bytes padding
+;;
+;; Event struct layout (32 bytes each):
+;;   offset  0 — userdata    u64  (same value as subscription.userdata)
+;;   offset  8 — error       u16  (0 = success)
+;;   offset 10 — type        u8   (same tag values as subscription)
+;;   offset 11 — padding     5 bytes
+;;   offset 16 — nbytes      u64  (bytes available for fd events)
+;;   offset 24 — flags       u16  (bit 0 = hangup)
+;;   offset 26 — padding     6 bytes
+
+;; (poll-fd-read fd timeout-ns) → :i32
+;; Wait until fd is readable, or until timeout-ns nanoseconds have elapsed.
+;; Returns 1 if fd is readable, 0 if timed out, or -errno on error.
+;; Pass timeout-ns = -1i64 to wait forever (clock subscription omitted).
+;;
+;; Internally allocates two subscriptions (fd_read + clock) and one event slot.
+(defn poll-fd-read (fd :i32 timeout-ns :i64) :i32
+  ;; 2 subscriptions × 48 bytes = 96; 2 events × 32 bytes = 64
+  (let subs  :ptr (alloc 96)
+    (let evts  :ptr (alloc 64)
+      (let nevt  :ptr (alloc 4)
+        ;; subscription 0: fd_read
+        (i64.store subs 0i64)                          ;; userdata = 0
+        (i32.store8 (+ subs 8) 1)                      ;; tag = fd_read
+        (i32.store  (+ subs 16) fd)                    ;; fd
+        ;; subscription 1: clock timeout (only if timeout-ns >= 0)
+        (let nsubs :i32
+          (if (>= timeout-ns 0i64)
+            (progn
+              (i64.store  (+ subs 48) 1i64)            ;; userdata = 1
+              (i32.store8 (+ subs 56) 0)               ;; tag = clock
+              (i32.store  (+ subs 64) 1)               ;; clock_id = MONOTONIC
+              (i64.store  (+ subs 72) timeout-ns)      ;; timeout
+              (i64.store  (+ subs 80) 0i64)            ;; precision
+              (i32.store  (+ subs 88) 0)               ;; flags (relative)
+              2)
+            1)
+          (let err :i32 (poll_oneoff subs evts nsubs nevt)
+            (if (!= err 0)
+              (* -1 err)
+              ;; scan events: return 1 if any fd_read event fired
+              (let n   :i32 (i32.load nevt)
+                (let i   :i32 0
+                  (let res :i32 0
+                    (while (< i n)
+                      (let etype :i32 (i32.load8_u (+ evts (+ (* i 32) 10)))
+                        (if (= etype 1)   ;; fd_read
+                          (set! res 1)))
+                      (set! i (+ i 1)))
+                    res))))))))))
+
+;; (poll-fd-write fd timeout-ns) → :i32
+;; Wait until fd is writable, or until timeout-ns nanoseconds have elapsed.
+;; Returns 1 if fd is writable, 0 if timed out, or -errno on error.
+;; Pass timeout-ns = -1i64 to wait forever.
+(defn poll-fd-write (fd :i32 timeout-ns :i64) :i32
+  (let subs  :ptr (alloc 96)
+    (let evts  :ptr (alloc 64)
+      (let nevt  :ptr (alloc 4)
+        (i64.store subs 0i64)
+        (i32.store8 (+ subs 8) 2)                      ;; tag = fd_write
+        (i32.store  (+ subs 16) fd)
+        (let nsubs :i32
+          (if (>= timeout-ns 0i64)
+            (progn
+              (i64.store  (+ subs 48) 1i64)
+              (i32.store8 (+ subs 56) 0)
+              (i32.store  (+ subs 64) 1)
+              (i64.store  (+ subs 72) timeout-ns)
+              (i64.store  (+ subs 80) 0i64)
+              (i32.store  (+ subs 88) 0)
+              2)
+            1)
+          (let err :i32 (poll_oneoff subs evts nsubs nevt)
+            (if (!= err 0)
+              (* -1 err)
+              (let n   :i32 (i32.load nevt)
+                (let i   :i32 0
+                  (let res :i32 0
+                    (while (< i n)
+                      (let etype :i32 (i32.load8_u (+ evts (+ (* i 32) 10)))
+                        (if (= etype 2)   ;; fd_write
+                          (set! res 1)))
+                      (set! i (+ i 1)))
+                    res))))))))))
+
+;; (poll-sleep-ns ns) — sleep for ns nanoseconds using a clock subscription.
+(defn poll-sleep-ns (ns :i64) :void
+  (let subs :ptr (alloc 48)
+    (let evts :ptr (alloc 32)
+      (let nevt :ptr (alloc 4)
+        (i64.store subs 0i64)
+        (i32.store8 (+ subs 8) 0)         ;; tag = clock
+        (i32.store  (+ subs 16) 1)        ;; clock_id = MONOTONIC
+        (i64.store  (+ subs 24) ns)       ;; timeout
+        (i64.store  (+ subs 32) 0i64)     ;; precision
+        (i32.store  (+ subs 40) 0)        ;; flags = relative
+        (drop (poll_oneoff subs evts 1 nevt))))))
+
+;; PollSub event type constants (WASI eventtype values)
+(defconst POLL-READ  1)  ;; fd_read  subscription
+(defconst POLL-WRITE 2)  ;; fd_write subscription
+(defconst POLL-CLOCK 0)  ;; clock (sleep) subscription
+
+;; PollSub — one entry in the subscription table passed to poll-fds.
+(deftype PollSub
+  (fd   :i32)  ;; file descriptor to watch
+  (type :i32)) ;; POLL-READ or POLL-WRITE
+
+;; PollEvent — result slot parallel to the PollSub table.
+;; After poll-fds returns, ready=1 means this subscription's fd fired.
+(deftype PollEvent
+  (ready  :i32)  ;; 1 = event fired, 0 = not fired / timed out
+  (error  :i32)  ;; per-event WASI errno (0 = success)
+  (nbytes :i64)) ;; bytes available (meaningful for fd_read events)
+
+;; (poll-fds subs nsubs timeout-ns results) → :i32
+;; Poll a table of (fd, type) subscriptions in one poll_oneoff call.
+;;   subs       — pointer to nsubs PollSub structs  (caller allocates)
+;;   nsubs      — number of fd subscriptions
+;;   timeout-ns — nanoseconds until timeout; -1i64 to block forever
+;;   results    — pointer to nsubs PollEvent structs (caller allocates)
+;; Returns 0 on success, -errno on error.
+;; On timeout all results remain ready=0; on error returns negative errno.
+(defn poll-fds (subs :ptr nsubs :i32 timeout-ns :i64 results :ptr) :i32
+  ;; WASI subscription buffer: (nsubs+1) × 48 bytes (+1 for optional clock)
+  (let wsubs :ptr (alloc (* (+ nsubs 1) 48))
+    (let wevts :ptr (alloc (* (+ nsubs 1) 32))
+      (let nevt :ptr (alloc 4)
+        ;; Body 1 of let nevt: zero the results array
+        (let ri :i32 0
+          (while (< ri nsubs)
+            (let rbase :i32 (* ri (sizeof PollEvent))
+              (i32.store (+ results rbase) 0)
+              (i32.store (+ results (+ rbase 4)) 0)
+              (i64.store (+ results (+ rbase 8)) 0i64))
+            (set! ri (+ ri 1))))
+        ;; Body 2 of let nevt: fill WASI subscriptions from the PollSub table
+        (let si :i32 0
+          (while (< si nsubs)
+            (let wbase :i32 (* si 48)
+              (let sbase :i32 (* si (sizeof PollSub))
+                (i64.store  (+ wsubs wbase) (as :i64 si))         ;; userdata = index
+                (i32.store8 (+ wsubs (+ wbase 8))
+                            (i32.load (+ subs (+ sbase 4))))       ;; tag = type
+                (i32.store  (+ wsubs (+ wbase 16))
+                            (i32.load (+ subs sbase)))))           ;; fd
+            (set! si (+ si 1))))
+        ;; Body 3: add optional clock subscription, call poll_oneoff, scan events
+        (let total :i32
+          (if (>= timeout-ns 0i64)
+            (let cbase :i32 (* nsubs 48)
+              (i64.store  (+ wsubs cbase) (as :i64 nsubs))         ;; userdata = nsubs (sentinel)
+              (i32.store8 (+ wsubs (+ cbase 8)) 0)                 ;; tag = clock
+              (i32.store  (+ wsubs (+ cbase 16)) 1)                ;; clock_id = MONOTONIC
+              (i64.store  (+ wsubs (+ cbase 24)) timeout-ns)       ;; timeout
+              (i64.store  (+ wsubs (+ cbase 32)) 0i64)             ;; precision
+              (i32.store  (+ wsubs (+ cbase 40)) 0)                ;; flags = relative
+              (+ nsubs 1))
+            nsubs)
+          (let err :i32 (poll_oneoff wsubs wevts total nevt)
+            (if (!= err 0)
+              (* -1 err)
+              ;; Scan returned events; use userdata as the PollSub slot index
+              (let n :i32 (i32.load nevt)
+                (let ei :i32 0
+                  (while (< ei n)
+                    (let ebase :i32 (* ei 32)
+                      (let uidx :i32 (as :i32 (i64.load (+ wevts ebase)))
+                        (if (< uidx nsubs)
+                          (let rbase :i32 (* uidx (sizeof PollEvent))
+                            (i32.store  (+ results rbase) 1)
+                            (i32.store  (+ results (+ rbase 4))
+                                        (i32.load16_u (+ wevts (+ ebase 8))))
+                            (i64.store  (+ results (+ rbase 8))
+                                        (i64.load (+ wevts (+ ebase 16))))))))
+                    (set! ei (+ ei 1)))
+                  0)))))))))

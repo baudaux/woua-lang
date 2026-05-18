@@ -72,3 +72,82 @@
 ;; Returns the WASIX errno (0 = success, 58 = ENOTSUP if not a TTY).
 (defmacro tty-set (buf)
   (tty_set (as :i32 buf)))
+
+;; ── Sockets (WASIX) ───────────────────────────────────────────────────────────
+;; WASI Preview 1 only exposes the accept/recv/send/shutdown side.
+;; WASIX adds the full lifecycle: open, bind, listen, connect.
+;;
+;; Address family (af) values:
+;;   AF_INET=1  AF_INET6=2  AF_LOCAL=3
+;; Socket type values:
+;;   SOCK_STREAM=1 (TCP)  SOCK_DGRAM=2 (UDP)
+;;
+;; sockaddr_in layout (16 bytes, written by make-sockaddr-ipv4):
+;;   offset 0: sin_family  i16 LE  (1 = AF_INET)
+;;   offset 2: sin_port    i16 BE  (network byte order — big-endian)
+;;   offset 4: sin_addr    4 bytes (IPv4 address octets b0..b3)
+;;   offset 8: sin_zero    8 bytes (padding, must be zero)
+
+;; ── Raw WASIX socket imports ─────────────────────────────────────────────────
+
+;; sock_open(af: i32, socktype: i32, proto: i32, fd_out: i32) → errno
+(defimport sock_open "wasix_32v1" "sock_open" (:i32 :i32 :i32 :i32) :i32)
+;; sock_bind(fd: i32, addr: i32) → errno   — addr points to a sockaddr_in
+(defimport sock_bind "wasix_32v1" "sock_bind" (:i32 :i32) :i32)
+;; sock_listen(fd: i32, backlog: i32) → errno
+(defimport sock_listen "wasix_32v1" "sock_listen" (:i32 :i32) :i32)
+;; sock_connect(fd: i32, addr: i32) → errno  — addr points to a sockaddr_in
+(defimport sock_connect "wasix_32v1" "sock_connect" (:i32 :i32) :i32)
+
+;; ── sockaddr_in builder ───────────────────────────────────────────────────────
+
+;; (make-sockaddr-ipv4 buf port b0 b1 b2 b3)
+;; Fill the 16-byte buffer at buf with a sockaddr_in for IPv4.
+;;   port — host byte order (the macro converts to network/big-endian order)
+;;   b0..b3 — IPv4 address octets, e.g. 127 0 0 1 for loopback
+(defmacro make-sockaddr-ipv4 (buf port b0 b1 b2 b3)
+  (i32.store8 buf 1)                              ;; sin_family = AF_INET (lo byte)
+  (i32.store8 (+ buf 1) 0)                        ;; sin_family hi byte
+  (i32.store8 (+ buf 2) (i32.shr_u port 8))       ;; sin_port hi byte (big-endian)
+  (i32.store8 (+ buf 3) (i32.and port 255))       ;; sin_port lo byte
+  (i32.store8 (+ buf 4) b0)
+  (i32.store8 (+ buf 5) b1)
+  (i32.store8 (+ buf 6) b2)
+  (i32.store8 (+ buf 7) b3)
+  (i32.store  (+ buf 8) 0)                        ;; sin_zero[0..3]
+  (i32.store  (+ buf 12) 0))                      ;; sin_zero[4..7]
+
+;; ── High-level socket helpers ─────────────────────────────────────────────────
+
+;; (sock-open-tcp) → :i32 — create a TCP/IPv4 socket; returns fd or negative errno.
+(defn sock-open-tcp () :i32
+  (let fd-out :ptr (alloc 4)
+    (let err :i32 (sock_open 1 1 0 fd-out)
+      (if (= err 0) (i32.load fd-out) (* -1 err)))))
+
+;; (sock-open-udp) → :i32 — create a UDP/IPv4 socket; returns fd or negative errno.
+(defn sock-open-udp () :i32
+  (let fd-out :ptr (alloc 4)
+    (let err :i32 (sock_open 1 2 0 fd-out)
+      (if (= err 0) (i32.load fd-out) (* -1 err)))))
+
+;; (sock-bind-ipv4 fd port b0 b1 b2 b3) → :i32  (0 = ok, non-zero = errno)
+;; Bind fd to the given IPv4 address and port.
+;; Example: (sock-bind-ipv4 fd 8080 0 0 0 0)  — bind to 0.0.0.0:8080
+(defn sock-bind-ipv4 (fd :i32 port :i32 b0 :i32 b1 :i32 b2 :i32 b3 :i32) :i32
+  (let addr :ptr (alloc 16)
+    (make-sockaddr-ipv4 addr port b0 b1 b2 b3)
+    (sock_bind fd addr)))
+
+;; (sock-listen-fd fd backlog) → :i32  (0 = ok, non-zero = errno)
+;; Mark fd as a passive socket ready to accept connections.
+(defn sock-listen-fd (fd :i32 backlog :i32) :i32
+  (sock_listen fd backlog))
+
+;; (sock-connect-ipv4 fd port b0 b1 b2 b3) → :i32  (0 = ok, non-zero = errno)
+;; Connect fd to the remote IPv4 address:port.
+;; Example: (sock-connect-ipv4 fd 80 93 184 216 34)  — connect to 93.184.216.34:80
+(defn sock-connect-ipv4 (fd :i32 port :i32 b0 :i32 b1 :i32 b2 :i32 b3 :i32) :i32
+  (let addr :ptr (alloc 16)
+    (make-sockaddr-ipv4 addr port b0 b1 b2 b3)
+    (sock_connect fd addr)))

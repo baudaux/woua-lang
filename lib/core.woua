@@ -41,8 +41,14 @@
 ;; An f64 literal: float digits followed by the "f64" suffix.
 (defliteral float64 /-?[0-9]*\.[0-9]+f64/ :f64)
 
+;; An f64 literal with scientific notation: e.g. 1.5e-3f64, -2.7e+10f64.
+(defliteral float64e /-?[0-9]*\.?[0-9]+[eE][+-]?[0-9]+f64/ :f64)
+
 ;; A float literal: optional minus, digits, a decimal point, and more digits → f32.
 (defliteral float  /-?[0-9]*\.[0-9]+/    :f32)
+
+;; A float literal with scientific notation: e.g. 1.5e-3, -2.7e+10 → f32.
+(defliteral floate /-?[0-9]*\.?[0-9]+[eE][+-]?[0-9]+/ :f32)
 
 ;; ── Control flow macros ───────────────────────────────────────────────────────
 
@@ -123,4 +129,7 @@
 (defop <= "f64.le" (:f64 :f64) :i32)
 (defop >= "f64.ge" (:f64 :f64) :i32)
 
-
+;; ── Memory ───────────────────────────────────────────────────────────────────
+;; (memory-grow n) — grow linear memory by n pages (1 page = 64 KB).
+;; Returns the previous page count, or -1 on failure.
+(defop memory-grow "memory.grow" (:i32) :i32)

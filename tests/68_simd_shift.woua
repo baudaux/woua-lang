@@ -1,0 +1,30 @@
+;; @test simd_shift
+;; @feature shl, shr_s, shr_u on :i32x4
+;; a=(4 8 16 32)
+;;   shl 1  → 8 16 32 64
+;;   shr_u 1 → 2 4 8 16
+;; neg=(-8 -16 -32 -64)
+;;   shr_s 1 → -4 -8 -16 -32  (arithmetic shift preserves sign)
+;; @expect
+;;   shl: 8 16 32 64
+;;   shr_u: 2 4 8 16
+;;   shr_s: -4 -8 -16 -32
+
+(include io)
+(include simd)
+
+(defn main () :void
+  (let a :i32x4 4:8:16:32i32x4
+    (let sl :i32x4 (shl a 1)
+      (let sr :i32x4 (shr_u a 1)
+        (let neg :i32x4 -8:-16:-32:-64i32x4
+          (let sa :i32x4 (shr_s neg 1)
+            (printf "shl: %d %d %d %d\n"
+              (extract_lane 0 sl) (extract_lane 1 sl)
+              (extract_lane 2 sl) (extract_lane 3 sl))
+            (printf "shr_u: %d %d %d %d\n"
+              (extract_lane 0 sr) (extract_lane 1 sr)
+              (extract_lane 2 sr) (extract_lane 3 sr))
+            (printf "shr_s: %d %d %d %d\n"
+              (extract_lane 0 sa) (extract_lane 1 sa)
+              (extract_lane 2 sa) (extract_lane 3 sa))))))))

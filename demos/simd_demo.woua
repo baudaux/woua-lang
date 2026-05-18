@@ -1,0 +1,42 @@
+;; demos/simd.woua — SIMD demo: i32x4 element-wise add and f32x4 dot product.
+;;
+;; Run with:  wasmtime --enable-simd demos/simd.wasm
+;;
+;; Demonstrates:
+;;   1:2:3:4i32x4         — typed SIMD vector literal
+;;   +  on :i32x4         — element-wise i32 add
+;;   extract_lane   — extract one i32 lane
+;;   f32x4-splat          — broadcast one f32 to all lanes
+;;   *  on :f32x4         — element-wise f32 multiply
+;;   f32x4.dot-product    — convenience macro (horizontal sum)
+
+(include core)
+(include io)
+(include simd)
+
+;; Part 2: f32x4 dot product
+;; af = (1.0  2.0  3.0  4.0)   bf = (1.0  1.0  1.0  1.0)
+;; expected dot = 1 + 2 + 3 + 4 = 10
+(defn simd-dot-demo () :void
+  (let af :f32x4 1.0:2.0:3.0:4.0f32x4
+    (let bf :f32x4 (f32x4-splat 1.0)
+      (let dot :f32 (f32x4.dot-product af bf)
+        (let dot_i :i32 (as :i32 dot)
+          (printf "f32x4 dot product: %d\n" dot_i))))))
+
+;; Part 1: i32x4 element-wise add
+;; a = (10 20 30 40)  b = (1 2 3 4)  c = (11 22 33 44)
+(defn simd-add-demo () :void
+  (let a :i32x4 10:20:30:40i32x4
+    (let b :i32x4 1:2:3:4i32x4
+      (let c :i32x4 (+ a b)
+        (printf "i32x4 add: %d %d %d %d\n"
+          (extract_lane 0 c)
+          (extract_lane 1 c)
+          (extract_lane 2 c)
+          (extract_lane 3 c))))))
+
+;; main
+(defn main () :void
+  (simd-add-demo)
+  (simd-dot-demo))

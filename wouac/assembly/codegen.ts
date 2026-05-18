@@ -20,20 +20,21 @@
 //   symbol                                local.get
 
 import { Node, ListNode, IntNode, FloatNode, SymbolNode,
-         CommentNode,
-         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_LIST, TAG_COMMENT } from "./ast";
+         CommentNode, V128Node,
+         TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_LIST, TAG_COMMENT, TAG_V128 } from "./ast";
 import { Env, OpInfo, FuncTypeEntry } from "./env";
 import { ExpandedForm } from "./expander";
 import { expandFieldGet, expandFieldSet } from "./macros";
 import {
   watI32Const, watF32Const, watF64Const, watI64Const,
   watLocalGet, watLocalSet, watLocalDecl,
-  watI32Store, watI32Store8, watI32Load, watI32Load8u,
+  watI32Store, watI32Store8, watI32Load, watI32Load8u, watI32Load16u,
   watI64Store, watI64Load,
   watF32Store, watF32Load, watF64Store, watF64Load,
   watIf, watBlock, watLoop, watBrIf, watBr,
   watCall, watDrop, watReturn,
 } from "./primitives";
+import { peepholeOptimizeBody } from "./peephole";
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
             env.errors.push("defn: duplicate function name '" + name + "'");
           }
           const wat  = codegenDefn(list, env);
-          env.funcBodies.set(name, pendingComment + wat);
+          env.funcBodies.set(name, pendingComment + (env.noPeephole ? wat : peepholeOptimizeBody(wat)));
           env.funcNames.push(name);
           pendingComment = "";
         }
@@ -116,11 +117,19 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
 // Convert a woua type keyword to a WAT primitive type name.
 // Known primitives: :i32 :i64 :f32 :f64 :ptr :u8
 // User-defined struct types (e.g. :Iovec) are pointer-sized → i32.
+// True for the six typed SIMD subtypes (:i8x16, :i16x8, :i32x4, :i64x2, :f32x4, :f64x2).
+// All are 128-bit (v128 in WAT) with specific lane interpretations.
+function isSimdSubtype(t: string): bool {
+  return t == ":i8x16" || t == ":i16x8" || t == ":i32x4" ||
+         t == ":i64x2" || t == ":f32x4" || t == ":f64x2";
+}
+
 function watType(t: string): string {
   if (t == ":i32" || t == ":ptr" || t == ":u8") return "i32";
   if (t == ":i64")                 return "i64";
   if (t == ":f32")                 return "f32";
   if (t == ":f64")                 return "f64";
+  if (t == ":v128" || isSimdSubtype(t)) return "v128";
   if (t.startsWith(":func:"))      return "i32"; // function reference = table index
   // User-defined type name — struct instances are always heap pointers (i32)
   return "i32";
@@ -135,7 +144,8 @@ function isValueTypeAnnot(t: string, env: Env): bool {
   if (!t.startsWith(":")) return false;
   if (t.startsWith(":*")) return false;
   if (t == ":i32" || t == ":i64" || t == ":f32" || t == ":f64" ||
-      t == ":ptr" || t == ":u8"  || t == ":str" || t == ":void") return false;
+      t == ":ptr" || t == ":u8"  || t == ":str" || t == ":void" || t == ":v128") return false;
+  if (isSimdSubtype(t)) return false;
   if (t.startsWith(":func:")) return false;
   return env.types.has(t.slice(1));
 }
@@ -288,14 +298,15 @@ function assembleModule(env: Env): string {
 
   // Bump allocator: alloc(size i32) → ptr i32
   // $heap_ptr global is initialised to the end of static data (memoryOffset,
-  // aligned to 4 bytes) so that allocations never overlap the data section.
-  const alignedHeap = (env.memoryOffset + 3) & ~3;
+  // aligned to 8 bytes) so that allocations never overlap the data section.
+  // 8-byte alignment is the minimum required for i64 stores (e.g. clock_time_get).
+  const alignedHeap = (env.memoryOffset + 7) & ~7;
   out += "  (global $heap_ptr (mut i32) (i32.const " + alignedHeap.toString() + "))\n\n";
   out += "  (func $alloc (param $size i32) (result i32)\n";
   out += "    (local $ptr i32)\n";
   out += "    (local $aligned i32)\n";
   out += "    (local.set $ptr (global.get $heap_ptr))\n";
-  out += "    (local.set $aligned (i32.and (i32.add (local.get $size) (i32.const 3)) (i32.const -4)))\n";
+  out += "    (local.set $aligned (i32.and (i32.add (local.get $size) (i32.const 7)) (i32.const -8)))\n";
   out += "    (global.set $heap_ptr (i32.add (local.get $ptr) (local.get $aligned)))\n";
   out += "    (local.get $ptr)\n";
   out += "  )\n\n";
@@ -389,6 +400,8 @@ function normalizeType(t: string): string {
   if (t == ":i64")                               return ":i64";
   if (t == ":f32")                               return ":f32";
   if (t == ":f64")                               return ":f64";
+  if (t == ":v128")                              return ":v128";
+  if (isSimdSubtype(t))                          return t; // subtypes match exactly
   if (t.startsWith(":func:"))                    return ":i32"; // function reference is i32
   return ":i32"; // user-defined struct type (pointer)
 }
@@ -438,6 +451,7 @@ function resolveOp(name: string, argTypes: Array<string>, env: Env): OpInfo | nu
 function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
   if (node.tag == TAG_INT)    return (node as IntNode).wide   ? ":i64" : ":i32";
   if (node.tag == TAG_FLOAT)  return (node as FloatNode).wide  ? ":f64" : ":f32";
+  if (node.tag == TAG_V128)   return ":" + (node as V128Node).laneType;
   if (node.tag == TAG_SYMBOL) {
     const sym = (node as SymbolNode).name;
     if (sym.startsWith("__str:")) return ":str"; // interned string literal
@@ -457,7 +471,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (list.children[0].tag != TAG_SYMBOL) return ":i32";
     const op = (list.children[0] as SymbolNode).name;
     if (op == "as") return (list.children[1] as SymbolNode).name;
-    if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8" || op == "array-set!") return "";
+    if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8" || op == "array-set!" || op == "v128.store") return "";
     if (op.includes("/") && op.endsWith("!")) return ""; // struct setter → void
     if (op == "let") {
       // ── Tuple destructuring ──────────────────────────────────────────────────
@@ -536,6 +550,35 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (op == "fn-ref") return ":i32"; // table index is i32
     if (op == "i64.load") return ":i64";
     if (op == "i64.store") return "";  // void
+    if (op == "f32.load") return ":f32";
+    if (op == "f32.store") return ""; // void
+    if (op == "f64.load") return ":f64";
+    if (op == "f64.store") return ""; // void
+    // ── SIMD ──────────────────────────────────────────────────────────────────
+    if (op == "v128.load")  return ":v128";
+    if (op == "v128.store") return "";
+    if (op == "v128.const") return ":v128";
+    if (op == "i8x16.extract_lane_s" || op == "i8x16.extract_lane_u") return ":i32";
+    if (op == "i16x8.extract_lane_s" || op == "i16x8.extract_lane_u") return ":i32";
+    if (op == "i32x4.extract_lane") return ":i32";
+    if (op == "i64x2.extract_lane") return ":i64";
+    if (op == "f32x4.extract_lane") return ":f32";
+    if (op == "f64x2.extract_lane") return ":f64";
+    // Generic type-dispatched extract_lane / replace_lane
+    if (op == "extract_lane" || op == "extract_lane_s" || op == "extract_lane_u") {
+      const vecT = typeOf(list.children[2], env, locals);
+      if (vecT == ":i64x2") return ":i64";
+      if (vecT == ":f32x4") return ":f32";
+      if (vecT == ":f64x2") return ":f64";
+      return ":i32"; // :i8x16, :i16x8, :i32x4
+    }
+    if (op == "replace_lane") return typeOf(list.children[2], env, locals);
+    if (op == "i8x16.replace_lane")  return ":i8x16";
+    if (op == "i16x8.replace_lane")  return ":i16x8";
+    if (op == "i32x4.replace_lane")  return ":i32x4";
+    if (op == "i64x2.replace_lane")  return ":i64x2";
+    if (op == "f32x4.replace_lane")  return ":f32x4";
+    if (op == "f64x2.replace_lane")  return ":f64x2";
     if (op == "array-ref") {
       if (list.children.length > 1 && list.children[1].tag == TAG_SYMBOL)
         return (list.children[1] as SymbolNode).name; // :T
@@ -751,6 +794,13 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
       return;
     }
     // ── Single binding ────────────────────────────────────────────────────────
+    if (list.children[1].tag != TAG_SYMBOL) {
+      // Malformed let (children[1] is not a symbol name); recurse into remaining children
+      for (let i = 2; i < list.children.length; i++) {
+        collectLetLocals(list.children[i], env, paramLocals, letLocals);
+      }
+      return;
+    }
     const letName = (list.children[1] as SymbolNode).name;
     let typeAnnot = "";
     let valIdx    = 2;
@@ -1103,6 +1153,7 @@ function ifResultDecl(node: Node, env: Env, locals: Map<string, string>): string
     }
   }
   const t = typeOf(node, env, locals);
+  if (t == ":str") return "i32 i32"; // :str is a fat-pointer (ptr, len) — two i32s
   return t != "" ? watType(t) : "";
 }
 
@@ -1127,6 +1178,24 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
     return fnode.wide
       ? watF64Const(f64(fnode.value))
       : watF32Const(f32(fnode.value));
+  }
+
+  // SIMD vector literal: 1:2:3:4i32x4 → (v128.const i32x4 1 2 3 4)
+  if (node.tag == TAG_V128) {
+    const vn = node as V128Node;
+    const floatLanes = vn.laneType.charAt(0) == "f";
+    let out = "(v128.const " + vn.laneType;
+    for (let i = 0; i < vn.values.length; i++) {
+      const v = vn.values[i];
+      if (floatLanes) {
+        // Emit as float — ensure decimal point is present
+        const s = v.toString();
+        out += " " + (s.indexOf(".") >= 0 || s.indexOf("e") >= 0 ? s : s + ".0");
+      } else {
+        out += " " + i64(v).toString();
+      }
+    }
+    return out + ")";
   }
 
   // Symbol — local variable reference, global variable, or interned string literal
@@ -1475,11 +1544,30 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     const val       = codegenExpr(list.children[valIdx], env, locals);
     const newLocalsS = copyLocals(locals);
     newLocalsS.set(letName, typeAnnot);
-    let bodyS = "(; let " + letName + " ;) " + watLocalSet(letName, val);
+    // Build the body first so we can analyse it before deciding how to emit.
+    let bodyS = "";
     for (let i = valIdx + 1; i < list.children.length; i++) {
-      bodyS += "\n    " + codegenExpr(list.children[i], env, newLocalsS);
+      if (bodyS.length > 0) bodyS += "\n    ";
+      bodyS += codegenExpr(list.children[i], env, newLocalsS);
     }
-    return bodyS;
+    // ── Single-use inlining: if val is pure and the local is read exactly once
+    // with no intervening set!, substitute the expression directly into the
+    // use site.  This eliminates the local.set / local.get round-trip and lets
+    // the Wasm value stack carry the value — matching what LLVM emits.
+    //
+    // Safety: we must not inline when any variable read by val is mutated
+    // (local.set) in the body BEFORE the use site of letName.  Example:
+    //   (let tmp (+ a b) (set! a b) (set! b tmp))  — a is set before tmp is read.
+    const getPattern = "(local.get $" + letName + ")";
+    const setPattern = "(local.set $" + letName + " ";
+    const useIdx = bodyS.indexOf(getPattern);
+    if (isPureWat(val)
+        && countOccurrences(bodyS, getPattern) == 1
+        && !bodyS.includes(setPattern)
+        && !anyLocalSetBefore(extractLocalGetNames(val), bodyS, useIdx)) {
+      return "(; let " + letName + " ;) " + replaceFirst(bodyS, getPattern, val);
+    }
+    return "(; let " + letName + " ;) " + watLocalSet(letName, val) + "\n    " + bodyS;
   }
 
   // ── (progn e1 e2 ... en) — evaluate in order, return last ─────────────────
@@ -1583,6 +1671,10 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   if (op == "i32.load8_u") {
     return watI32Load8u(codegenExpr(list.children[1], env, locals));
   }
+  // ── (i32.load16_u ptr) — unsigned 2-byte read ───────────────────
+  if (op == "i32.load16_u") {
+    return watI32Load16u(codegenExpr(list.children[1], env, locals));
+  }
   // ── (i64.load ptr) — 8-byte read → i64 ─────────────────────────
   if (op == "i64.load") {
     return watI64Load(codegenExpr(list.children[1], env, locals));
@@ -1590,6 +1682,24 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   // ── (i64.store ptr val) — 8-byte write ──────────────────────────
   if (op == "i64.store") {
     return watI64Store(codegenExpr(list.children[1], env, locals),
+                      codegenExpr(list.children[2], env, locals));
+  }
+  // ── (f32.load ptr) — 4-byte f32 read ────────────────────────────
+  if (op == "f32.load") {
+    return watF32Load(codegenExpr(list.children[1], env, locals));
+  }
+  // ── (f32.store ptr val) — 4-byte f32 write ──────────────────────
+  if (op == "f32.store") {
+    return watF32Store(codegenExpr(list.children[1], env, locals),
+                      codegenExpr(list.children[2], env, locals));
+  }
+  // ── (f64.load ptr) — 8-byte f64 read ────────────────────────────
+  if (op == "f64.load") {
+    return watF64Load(codegenExpr(list.children[1], env, locals));
+  }
+  // ── (f64.store ptr val) — 8-byte f64 write ──────────────────────
+  if (op == "f64.store") {
+    return watF64Store(codegenExpr(list.children[1], env, locals),
                       codegenExpr(list.children[2], env, locals));
   }
 
@@ -1608,6 +1718,114 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     if (etype == ":f32") return watF32Load(addrExpr);
     if (etype == ":f64") return watF64Load(addrExpr);
     return watI32Load(addrExpr); // :i32, :ptr, :*T, etc.
+  }
+
+  // ── SIMD instructions ─────────────────────────────────────────────────────
+
+  // (v128.load ptr) → (v128.load expr)
+  if (op == "v128.load") {
+    return "(v128.load " + codegenExpr(list.children[1], env, locals) + ")";
+  }
+
+  // (v128.store ptr val) → (v128.store expr expr)  void
+  if (op == "v128.store") {
+    return "(v128.store " + codegenExpr(list.children[1], env, locals)
+                  + " " + codegenExpr(list.children[2], env, locals) + ")";
+  }
+
+  // (v128.const b0 b1 ... b15) → (v128.const i8x16 0 1 2 ...)
+  // Accepts exactly 16 integer literal arguments (bytes).
+  if (op == "v128.const") {
+    let out = "(v128.const i8x16";
+    for (let i = 1; i < list.children.length; i++) {
+      const b = codegenExpr(list.children[i], env, locals);
+      // Strip (i32.const N) down to just N for the immediate
+      if (b.startsWith("(i32.const ") && b.endsWith(")")) {
+        out += " " + b.slice(11, b.length - 1);
+      } else {
+        out += " " + b;
+      }
+    }
+    return out + ")";
+  }
+
+  // Lane extract: (i32x4.extract_lane lane vec) → (i32x4.extract_lane LANE expr)
+  // Lane must be a compile-time integer literal.
+  if (op == "i8x16.extract_lane_s" || op == "i8x16.extract_lane_u" ||
+      op == "i16x8.extract_lane_s" || op == "i16x8.extract_lane_u" ||
+      op == "i32x4.extract_lane"   || op == "i64x2.extract_lane"   ||
+      op == "f32x4.extract_lane"   || op == "f64x2.extract_lane") {
+    if (list.children[1].tag != TAG_INT) {
+      return ";; ERROR: " + op + ": lane index must be an integer literal";
+    }
+    const lane = (list.children[1] as IntNode).value;
+    const vec  = codegenExpr(list.children[2], env, locals);
+    return "(" + op + " " + lane.toString() + " " + vec + ")";
+  }
+
+  // Generic extract_lane / extract_lane_s / extract_lane_u — type-dispatched
+  if (op == "extract_lane" || op == "extract_lane_s" || op == "extract_lane_u") {
+    if (list.children[1].tag != TAG_INT) {
+      return ";; ERROR: extract_lane: lane index must be an integer literal";
+    }
+    const elLane = (list.children[1] as IntNode).value;
+    const elVec  = codegenExpr(list.children[2], env, locals);
+    const elType = typeOf(list.children[2], env, locals);
+    let elOp: string;
+    if (elType == ":i8x16")       elOp = op == "extract_lane_u" ? "i8x16.extract_lane_u" : "i8x16.extract_lane_s";
+    else if (elType == ":i16x8")  elOp = op == "extract_lane_u" ? "i16x8.extract_lane_u" : "i16x8.extract_lane_s";
+    else if (elType == ":i64x2")  elOp = "i64x2.extract_lane";
+    else if (elType == ":f32x4")  elOp = "f32x4.extract_lane";
+    else if (elType == ":f64x2")  elOp = "f64x2.extract_lane";
+    else                          elOp = "i32x4.extract_lane"; // :i32x4 and generic :v128
+    return "(" + elOp + " " + elLane.toString() + " " + elVec + ")";
+  }
+
+  // Lane replace: (i32x4.replace_lane lane vec val) → (i32x4.replace_lane LANE expr expr)
+  if (op == "i8x16.replace_lane" || op == "i16x8.replace_lane" ||
+      op == "i32x4.replace_lane" || op == "i64x2.replace_lane" ||
+      op == "f32x4.replace_lane" || op == "f64x2.replace_lane") {
+    if (list.children[1].tag != TAG_INT) {
+      return ";; ERROR: " + op + ": lane index must be an integer literal";
+    }
+    const lane2 = (list.children[1] as IntNode).value;
+    const vec2  = codegenExpr(list.children[2], env, locals);
+    const val3  = codegenExpr(list.children[3], env, locals);
+    return "(" + op + " " + lane2.toString() + " " + vec2 + " " + val3 + ")";
+  }
+
+  // Generic replace_lane — type-dispatched
+  if (op == "replace_lane") {
+    if (list.children[1].tag != TAG_INT) {
+      return ";; ERROR: replace_lane: lane index must be an integer literal";
+    }
+    const rlLane = (list.children[1] as IntNode).value;
+    const rlVec  = codegenExpr(list.children[2], env, locals);
+    const rlVal  = codegenExpr(list.children[3], env, locals);
+    const rlType = typeOf(list.children[2], env, locals);
+    let rlOp: string;
+    if (rlType == ":i8x16")       rlOp = "i8x16.replace_lane";
+    else if (rlType == ":i16x8")  rlOp = "i16x8.replace_lane";
+    else if (rlType == ":i64x2")  rlOp = "i64x2.replace_lane";
+    else if (rlType == ":f32x4")  rlOp = "f32x4.replace_lane";
+    else if (rlType == ":f64x2")  rlOp = "f64x2.replace_lane";
+    else                          rlOp = "i32x4.replace_lane"; // :i32x4 fallback
+    return "(" + rlOp + " " + rlLane.toString() + " " + rlVec + " " + rlVal + ")";
+  }
+
+  // (i8x16.shuffle m0..m15 a b) → (i8x16.shuffle m0 m1 ... m15 expr expr)
+  // First 16 args are lane selectors (integer literals), last two are vectors.
+  if (op == "i8x16.shuffle") {
+    let out = "(i8x16.shuffle";
+    for (let i = 1; i <= 16; i++) {
+      if (list.children[i].tag != TAG_INT) {
+        return ";; ERROR: i8x16.shuffle: lane selectors must be integer literals";
+      }
+      out += " " + (list.children[i] as IntNode).value.toString();
+    }
+    out += " " + codegenExpr(list.children[17], env, locals);
+    out += " " + codegenExpr(list.children[18], env, locals);
+    return out + ")";
   }
 
   // ── (array-set! :T data-ptr idx val) — typed element store ───────────────
@@ -1750,6 +1968,64 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     args.push(codegenExpr(list.children[i], env, locals));
   }
   return watCall(op, args);
+}
+
+// ─── Helpers for single-use let inlining ─────────────────────────────────────
+
+// Count non-overlapping occurrences of needle in haystack.
+function countOccurrences(haystack: string, needle: string): i32 {
+  let count: i32 = 0;
+  let idx: i32 = 0;
+  while (true) {
+    const found = haystack.indexOf(needle, idx);
+    if (found == -1) break;
+    count++;
+    idx = found + needle.length;
+  }
+  return count;
+}
+
+// Returns true when the WAT snippet has no observable side effects:
+// no function calls, no memory loads/stores, no global reads.
+function isPureWat(wat: string): bool {
+  return !wat.includes("call ")
+      && !wat.includes(".load")
+      && !wat.includes(".store")
+      && !wat.includes("global.");
+}
+
+// Replace the first occurrence of search with replacement in str.
+function replaceFirst(str: string, search: string, replacement: string): string {
+  const idx = str.indexOf(search);
+  if (idx == -1) return str;
+  return str.slice(0, idx) + replacement + str.slice(idx + search.length);
+}
+
+// Collect the variable names appearing as (local.get $name) operands in wat.
+function extractLocalGetNames(wat: string): Array<string> {
+  const names = new Array<string>();
+  const prefix = "(local.get $";
+  let idx: i32 = 0;
+  while (true) {
+    const found = wat.indexOf(prefix, idx);
+    if (found == -1) break;
+    const start = found + prefix.length;
+    let end = start;
+    while (end < wat.length && wat.charCodeAt(end) != 41 /* ) */) end++;
+    names.push(wat.slice(start, end));
+    idx = found + prefix.length;
+  }
+  return names;
+}
+
+// Returns true if any of the given variable names are written (local.set) in
+// body[0..beforeIdx) — i.e., before the inlining candidate's use site.
+function anyLocalSetBefore(names: Array<string>, body: string, beforeIdx: i32): bool {
+  const prefix = body.slice(0, beforeIdx);
+  for (let i = 0; i < names.length; i++) {
+    if (prefix.includes("(local.set $" + names[i] + " ")) return true;
+  }
+  return false;
 }
 
 

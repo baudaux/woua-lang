@@ -160,3 +160,80 @@
   (let buf   :ptr (alloc 24)
     (let start :ptr (i64-digits-buf n buf)
       (values start (- (+ buf 21) start)))))
+
+;; ── Float → str ──────────────────────────────────────────────────────────────
+
+;; (f32->str f) → :str
+;; Format f as a decimal string with 6 fractional digits, e.g. "3.141593".
+;; Handles nan, +inf, -inf, and negative values.
+;; The integer part is handled via i64, so values up to 2^63 are supported.
+(defn f32->str (f :f32) :str
+  (if (!= f f) "nan"
+  (if (and (= f (/ f 2.0)) (!= f 0.0))
+    (if (< f 0.0) "-inf" "inf")
+    (let neg    :i32 (< f 0.0)
+    (let fabs   :f64 (if neg (- 0.0f64 (as :f64 f)) (as :f64 f))
+    (let ipart  :i64 (as :i64 fabs)
+    (let ipf    :f64 (as :f64 ipart)
+    (let frac6  :i32 (as :i32 (+ (* (- fabs ipf) 1000000.0f64) 0.5f64))
+    (let carry  :i32 (/ frac6 1000000)
+    (let ipart2 :i64 (+ ipart (as :i64 carry))
+    (let frac6c :i32 (- frac6 (* carry 1000000))
+    (let buf    :ptr (alloc 64)
+    (let pos    :i32 0
+    (let tmp    :ptr (alloc 24)
+    (let istart :ptr (i64-digits-buf ipart2 tmp)
+    (let ilen   :i32 (- (+ tmp 21) istart)
+    (let i      :i32 0
+      (if neg (let _d :i32 0 (i32.store8 buf 45) (set! pos 1)))
+      (while (< i ilen)
+        (i32.store8 (+ buf (+ pos i)) (i32.load8_u (+ istart i)))
+        (set! i (+ i 1)))
+      (set! pos (+ pos ilen))
+      (i32.store8 (+ buf pos) 46)
+      (set! pos (+ pos 1))
+      (let fp :i32 (+ pos 5)
+      (let fc :i32 frac6c
+      (let fi :i32 0
+        (while (< fi 6)
+          (i32.store8 (+ buf (- fp fi)) (+ 48 (- fc (* (/ fc 10) 10))))
+          (set! fc (/ fc 10))
+          (set! fi (+ fi 1)))
+        (values buf (+ pos 6))))))))))))))))))))))
+
+;; (f64->str f) → :str
+;; Format f as a decimal string with 6 fractional digits.
+;; Like f32->str but operates entirely in f64 for greater precision.
+(defn f64->str (f :f64) :str
+  (if (!= f f) "nan"
+  (if (and (= f (/ f 2.0f64)) (!= f 0.0f64))
+    (if (< f 0.0f64) "-inf" "inf")
+    (let neg    :i32 (< f 0.0f64)
+    (let fabs   :f64 (if neg (- 0.0f64 f) f)
+    (let ipart  :i64 (as :i64 fabs)
+    (let ipf    :f64 (as :f64 ipart)
+    (let frac6  :i32 (as :i32 (+ (* (- fabs ipf) 1000000.0f64) 0.5f64))
+    (let carry  :i32 (/ frac6 1000000)
+    (let ipart2 :i64 (+ ipart (as :i64 carry))
+    (let frac6c :i32 (- frac6 (* carry 1000000))
+    (let buf    :ptr (alloc 64)
+    (let pos    :i32 0
+    (let tmp    :ptr (alloc 24)
+    (let istart :ptr (i64-digits-buf ipart2 tmp)
+    (let ilen   :i32 (- (+ tmp 21) istart)
+    (let i      :i32 0
+      (if neg (let _d :i32 0 (i32.store8 buf 45) (set! pos 1)))
+      (while (< i ilen)
+        (i32.store8 (+ buf (+ pos i)) (i32.load8_u (+ istart i)))
+        (set! i (+ i 1)))
+      (set! pos (+ pos ilen))
+      (i32.store8 (+ buf pos) 46)
+      (set! pos (+ pos 1))
+      (let fp :i32 (+ pos 5)
+      (let fc :i32 frac6c
+      (let fi :i32 0
+        (while (< fi 6)
+          (i32.store8 (+ buf (- fp fi)) (+ 48 (- fc (* (/ fc 10) 10))))
+          (set! fc (/ fc 10))
+          (set! fi (+ fi 1)))
+        (values buf (+ pos 6))))))))))))))))))))))

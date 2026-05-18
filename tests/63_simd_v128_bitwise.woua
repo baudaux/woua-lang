@@ -1,0 +1,36 @@
+;; @test simd_v128_bitwise
+;; @feature v128.and, v128.or, v128.xor, v128.not
+;; a=(5,10,0,0) b=(3,12,0,0): 5&3=1 10&12=8  5|3=7 10|12=14  5^3=6 10^12=6
+;; @expect
+;;   and: 1 8 0 0
+;;   or:  7 14 0 0
+;;   xor: 6 6 0 0
+;;   not-lane0: -2
+
+(include io)
+(include simd)
+
+(defn test-and-or (a :v128 b :v128) :void
+  (let c :v128 (v-and a b)
+    (let d :v128 (v-or a b)
+      (printf "and: %d %d %d %d\n"
+        (extract_lane 0 c) (extract_lane 1 c)
+        (extract_lane 2 c) (extract_lane 3 c))
+      (printf "or:  %d %d %d %d\n"
+        (extract_lane 0 d) (extract_lane 1 d)
+        (extract_lane 2 d) (extract_lane 3 d)))))
+
+(defn test-xor-not (a :v128 b :v128) :void
+  (let e :v128 (v-xor a b)
+    (let one :v128 1:0:0:0i32x4
+      (let n :v128 (v-not one)
+        (printf "xor: %d %d %d %d\n"
+          (extract_lane 0 e) (extract_lane 1 e)
+          (extract_lane 2 e) (extract_lane 3 e))
+        (printf "not-lane0: %d\n" (extract_lane 0 n))))))
+
+(defn main () :void
+  (let a :v128 5:10:0:0i32x4
+    (let b :v128 3:12:0:0i32x4
+      (test-and-or a b)
+      (test-xor-not a b))))

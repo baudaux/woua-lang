@@ -7,6 +7,7 @@ export const TAG_LIST      : i32 = 4;
 export const TAG_REGEX     : i32 = 5;
 export const TAG_MACROLIST : i32 = 6; // compile-time list of nodes (variadic macro args)
 export const TAG_COMMENT   : i32 = 7; // source comment forwarded to WAT output
+export const TAG_V128      : i32 = 8; // SIMD vector literal  1:2:3:4i32x4
 
 // Base node — all AST nodes carry a tag for dynamic dispatch
 export class Node {
@@ -80,4 +81,17 @@ export class ListNode extends Node {
 export class CommentNode extends Node {
   text: string;
   constructor(t: string) { super(TAG_COMMENT); this.text = t; }
+}
+
+// SIMD vector literal — 1:2:3:4i32x4, 1.0:2.0:3.0:4.0f32x4, etc.
+// laneType is one of: "i8x16", "i16x8", "i32x4", "i64x2", "f32x4", "f64x2"
+// values has exactly laneCount entries (splat already expanded by the reader).
+export class V128Node extends Node {
+  laneType: string;
+  values:   Array<f64>;
+  constructor(laneType: string, values: Array<f64>) {
+    super(TAG_V128);
+    this.laneType = laneType;
+    this.values   = values;
+  }
 }

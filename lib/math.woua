@@ -1,0 +1,170 @@
+;; Math library — WASM float intrinsics + software implementations.
+;;
+;; WASM native intrinsics (defined here as defop):
+;;   sqrt, abs, floor, ceil, round, neg, min, max  — for :f32 and :f64
+;;
+;; Software implementations with type-dispatched operators:
+;;   sin, cos, exp, log, pow  — overloaded for :f32 and :f64
+;;   (internal defn: math-sin, math-cos, math-exp, math-log, math-pow)
+;;
+;; All software functions operate on :f64 internally.
+;; :f32 overloads cast to f64, compute, then cast back.
+;;
+;; Usage:
+;;   (include math)
+;;   (sqrt 2.0)             → 1.414213...
+;;   (sin  3.14159f64)      → ~0.0
+;;   (exp  1.0f64)          → 2.718281...
+;;   (log  2.718281f64)     → ~1.0
+;;   (pow  2.0f64 10.0f64)  → 1024.0
+
+(include core)
+
+;; ── f32 intrinsics ───────────────────────────────────────────────────────────
+(defop sqrt  "f32.sqrt"    (:f32) :f32)
+(defop abs   "f32.abs"     (:f32) :f32)
+(defop floor "f32.floor"   (:f32) :f32)
+(defop ceil  "f32.ceil"    (:f32) :f32)
+(defop round "f32.nearest" (:f32) :f32)  ;; round-to-nearest-even
+(defop neg   "f32.neg"     (:f32) :f32)
+(defop min   "f32.min"     (:f32 :f32) :f32)
+(defop max   "f32.max"     (:f32 :f32) :f32)
+
+;; ── f64 intrinsics ───────────────────────────────────────────────────────────
+(defop sqrt  "f64.sqrt"    (:f64) :f64)
+(defop abs   "f64.abs"     (:f64) :f64)
+(defop floor "f64.floor"   (:f64) :f64)
+(defop ceil  "f64.ceil"    (:f64) :f64)
+(defop round "f64.nearest" (:f64) :f64)  ;; round-to-nearest-even
+(defop neg   "f64.neg"     (:f64) :f64)
+(defop min   "f64.min"     (:f64 :f64) :f64)
+(defop max   "f64.max"     (:f64 :f64) :f64)
+
+;; ── exp(x) — e^x ─────────────────────────────────────────────────────────────
+;; Range reduction: x = k*ln2 + r, |r| <= ln2/2
+;; exp(x) = 2^k * exp(r), exp(r) via degree-11 minimax polynomial.
+;;
+;; Coefficients from standard minimax approximation for exp on [-ln2/2, ln2/2].
+(defn math-exp (x :f64) :f64
+  ;; Handle out-of-range inputs
+  (if (> x 709.0f64) (/ 1.0f64 0.0f64)           ;; +inf
+  (if (< x -745.0f64) 0.0f64
+  (let ln2     :f64 0.6931471805599453f64
+  (let inv_ln2 :f64 1.4426950408889634f64
+  (let k    :i32 (as :i32 (round (* x inv_ln2)))
+  (let r    :f64 (- x (* (as :f64 k) ln2))
+  ;; Horner scheme: 1 + r*(1 + r/2*(1 + r/3*(1 + r/4*(... ))))
+  ;; = sum r^n/n! for n=0..11
+  (let p :f64 (* r 2.0876756987868099e-09f64)
+  (let p :f64 (* r (+ 2.5052108385441720e-08f64 p))
+  (let p :f64 (* r (+ 2.7557319223985888e-07f64 p))
+  (let p :f64 (* r (+ 2.7557319223985888e-06f64 p))
+  (let p :f64 (* r (+ 2.4801587301587302e-05f64 p))
+  (let p :f64 (* r (+ 1.9841269841269841e-04f64 p))
+  (let p :f64 (* r (+ 1.3888888888888889e-03f64 p))
+  (let p :f64 (* r (+ 8.3333333333333332e-03f64 p))
+  (let p :f64 (* r (+ 4.1666666666666664e-02f64 p))
+  (let p :f64 (* r (+ 1.6666666666666667e-01f64 p))
+  (let p :f64 (* r (+ 5.0000000000000000e-01f64 p))
+  (let p :f64 (* r (+ 1.0f64 p))
+  (let p :f64       (+ 1.0f64 p)
+  ;; Scale by 2^k using bit manipulation via reinterpret
+  ;; 2^k = reinterpret((k+1023) << 52) as f64
+  ;; We build this as: store (i64) to heap, load as f64
+  (let pow2 :f64 (if (= k 0) 1.0f64
+    (let bits :i64 (* (+ (as :i64 k) 1023i64) 4503599627370496i64)
+    (let buf  :ptr (alloc 8)
+      (i64.store buf bits)
+      (f64.load buf))))
+  (* p pow2))))))))))))))))))))))
+
+;; ── log(x) — natural logarithm ───────────────────────────────────────────────
+;; Range reduction: x = 2^e * m, m in [1, 2)
+;; log(x) = e*ln2 + log(m)
+;; log(m) via Padé approximation on [1, 2): let s = (m-1)/(m+1),
+;; log(m) = 2*s*(1 + s^2/3 + s^4/5 + ... + s^10/11)
+(defn math-log (x :f64) :f64
+  (if (<= x 0.0f64) (/ (neg 1.0f64) 0.0f64)     ;; -inf for x <= 0
+  (if (= x 1.0f64) 0.0f64
+  ;; Extract exponent e and mantissa m via bit manipulation.
+  ;; Store x bits as i64, extract biased exponent, rebuild mantissa in [1,2).
+  (let buf      :ptr (alloc 8)
+  (let bits     :i64 (progn (f64.store buf x) (i64.load buf))
+  (let e_biased :i64 (/ bits 4503599627370496i64)   ;; >> 52
+  (let e        :i64 (- e_biased 1023i64)
+  ;; Rebuild mantissa: set exponent field to 1023 (unbiased 0 → value in [1,2))
+  (let m :f64 (progn
+    (i64.store buf (+ (* 1023i64 4503599627370496i64)
+                       (- bits (* e_biased 4503599627370496i64))))
+    (f64.load buf))
+  (let s  :f64 (/ (- m 1.0f64) (+ m 1.0f64))
+  (let s2 :f64 (* s s)
+  ;; Horner for 2*(s + s^3/3 + s^5/5 + s^7/7 + s^9/9 + s^11/11)
+  (let p :f64 (/ 2.0f64 11.0f64)
+  (let p :f64 (+ (/ 2.0f64 9.0f64) (* s2 p))
+  (let p :f64 (+ (/ 2.0f64 7.0f64) (* s2 p))
+  (let p :f64 (+ (/ 2.0f64 5.0f64) (* s2 p))
+  (let p :f64 (+ (/ 2.0f64 3.0f64) (* s2 p))
+  (let p :f64 (+ 2.0f64            (* s2 p))
+  (let p :f64 (* s p)
+  (+ (* (as :f64 e) 0.6931471805599453f64) p))))))))))))))))))
+
+;; ── sin(x) ────────────────────────────────────────────────────────────────────
+;; Range reduction to [-π/4, π/4] then polynomial approximation.
+;; Minimax coefficients for sin on [-π/4, π/4].
+(defn math-sin (x :f64) :f64
+  (let pi     :f64 3.141592653589793f64
+  (let two_pi :f64 6.283185307179586f64
+  ;; Reduce x modulo 2π to [-π, π]
+  (let xr :f64 (- x (* two_pi (floor (/ (+ x pi) two_pi))))
+  ;; Reduce to [-π/2, π/2] using sin(π-x) = sin(x)
+  (let xr :f64 (if (> xr 1.5707963267948966f64)
+                 (- pi xr)
+                 (if (< xr -1.5707963267948966f64)
+                   (- (neg pi) xr)
+                   xr))
+  ;; Polynomial: sin(x) ≈ x*(1 - x^2*(1/6 - x^2*(1/120 - x^2*(1/5040 - x^2/362880))))
+  (let x2 :f64 (* xr xr)
+  (let p :f64 (- 2.5052108385441720e-08f64 (* x2 2.7557319223985888e-12f64))
+  (let p :f64 (- 2.7557319223858795e-06f64 (* x2 p))
+  (let p :f64 (- 1.9841269841269841e-04f64 (* x2 p))
+  (let p :f64 (- 8.3333333333333329e-03f64 (* x2 p))
+  (let p :f64 (- 1.6666666666666666e-01f64 (* x2 p))
+  (* xr (- 1.0f64 (* x2 p))))))))))))))
+
+;; ── cos(x) ────────────────────────────────────────────────────────────────────
+;; cos(x) = sin(x + π/2)
+(defn math-cos (x :f64) :f64
+  (math-sin (+ x 1.5707963267948966f64)))
+
+;; ── pow(x, y) = exp(y * log(x)) ──────────────────────────────────────────────
+;; Special cases: pow(x, 0) = 1; pow(0, y) = 0 for y > 0.
+(defn math-pow (x :f64 y :f64) :f64
+  (if (= y 0.0f64) 1.0f64
+  (if (= x 0.0f64) 0.0f64
+  (if (and (< x 0.0f64) (!= (floor y) y))
+    (/ 0.0f64 0.0f64)   ;; nan: negative base with fractional exponent
+    (let ax :f64 (abs x)
+    (let result :f64 (math-exp (* y (math-log ax)))
+    (if (and (< x 0.0f64) (!= (* 2.0f64 (floor (* y 0.5f64))) y))
+      (neg result)   ;; odd integer exponent → negative
+      result)))))))
+
+;; ── f32 wrappers ──────────────────────────────────────────────────────────────
+(defn math-sin32  (x :f32) :f32  (as :f32 (math-sin  (as :f64 x))))
+(defn math-cos32  (x :f32) :f32  (as :f32 (math-cos  (as :f64 x))))
+(defn math-exp32  (x :f32) :f32  (as :f32 (math-exp  (as :f64 x))))
+(defn math-log32  (x :f32) :f32  (as :f32 (math-log  (as :f64 x))))
+(defn math-pow32  (x :f32 y :f32) :f32  (as :f32 (math-pow (as :f64 x) (as :f64 y))))
+
+;; ── operator overloads: sin/cos/exp/log/pow dispatch by type ─────────────────
+(defop sin "math-sin"  (:f64) :f64)
+(defop cos "math-cos"  (:f64) :f64)
+(defop exp "math-exp"  (:f64) :f64)
+(defop log "math-log"  (:f64) :f64)
+(defop pow "math-pow"  (:f64 :f64) :f64)
+(defop sin "math-sin32" (:f32) :f32)
+(defop cos "math-cos32" (:f32) :f32)
+(defop exp "math-exp32" (:f32) :f32)
+(defop log "math-log32" (:f32) :f32)
+(defop pow "math-pow32" (:f32 :f32) :f32)

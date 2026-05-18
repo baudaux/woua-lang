@@ -1,0 +1,31 @@
+;; @test io_poll
+;; @feature poll-sleep-ns, poll-fd-write, poll-fd-read on stdin
+;; @stdin hello
+;; @expect
+;;   sleep ok
+;;   stdout writable
+;;   stdin readable
+;;   got: hello
+
+(include io)
+
+(defn main () :void
+  ;; sleep 1 ms via a WASI clock subscription
+  (poll-sleep-ns 1000000i64)
+  (printf "sleep ok\n")
+
+  ;; stdout should always be writable immediately
+  (let rw :i32 (poll-fd-write STDOUT 1000000i64)
+    (if (= rw 1)
+      (printf "stdout writable\n")
+      (printf "poll-fd-write returned: %d\n" rw)))
+
+  ;; poll stdin — blocks until the piped @stdin data arrives
+  (let rr :i32 (poll-fd-read STDIN -1i64)
+    (if (= rr 1)
+      (progn
+        (printf "stdin readable\n")
+        (let buf :ptr (alloc 256)
+          (let line :str (read-line STDIN buf 255)
+            (printf "got: %s\n" line))))
+      (printf "poll-fd-read returned: %d\n" rr))))

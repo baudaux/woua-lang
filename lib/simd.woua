@@ -1,0 +1,262 @@
+;; lib/simd.woua — WebAssembly SIMD (v128) operator definitions.
+;;
+;; Usage: (include simd)
+;;
+;; Types: six typed SIMD subtypes map to WAT's v128 but carry lane information:
+;;   :i8x16  :i16x8  :i32x4  :i64x2  :f32x4  :f64x2
+;; The generic :v128 is also available as an untyped escape hatch.
+;;
+;; Type-dispatched operators (+, -, *, /, neg, abs, sqrt, min, max, =, !=,
+;; <s, <u, >s, >u, <=s, <=u, >=s, >=u, <, >, <=, >=, shl, shr_s, shr_u)
+;; are overloaded per subtype, so (+ a b) where a :i32x4 emits i32x4.add,
+;; (= a b) where a :i32x4 emits i32x4.eq (lane-wise mask), etc.
+;;
+;; SIMD vector literals produce the specific subtype:
+;;   1:2:3:4i32x4              :i32x4  → v128.const i32x4 1 2 3 4
+;;   1.0:2.0:3.0:4.0f32x4     :f32x4  → v128.const f32x4 1.0 2.0 3.0 4.0
+;;   5i32x4                    :i32x4  → splat (broadcast to all lanes)
+;;   0:1:2:…:15i8x16           :i8x16  → v128.const i8x16 0 1 2 … 15
+;;
+;; Low-level escape hatch (raw i8x16 bytes):
+;;   (v128.const b0..b15)       → :v128  — 16-byte literal (i8x16 interpretation)
+
+(include core)
+
+;; ── SIMD vector literal syntax ─────────────────────────────────────────────────────────────────
+;; Each defliteral returns the specific SIMD subtype so that operator
+;; dispatch (+ a b) can select the right instruction from argTypes.
+(defliteral v-i8x16  /-?[0-9]+(?::-?[0-9]+)*i8x16/              :i8x16)
+(defliteral v-i16x8  /-?[0-9]+(?::-?[0-9]+)*i16x8/              :i16x8)
+(defliteral v-i32x4  /-?[0-9]+(?::-?[0-9]+)*i32x4/              :i32x4)
+(defliteral v-i64x2  /-?[0-9]+(?::-?[0-9]+)*i64x2/              :i64x2)
+(defliteral v-f32x4  /-?[0-9]+(?:\.[0-9]+)?(?::-?[0-9]+(?:\.[0-9]+)?)*f32x4/ :f32x4)
+(defliteral v-f64x2  /-?[0-9]+(?:\.[0-9]+)?(?::-?[0-9]+(?:\.[0-9]+)?)*f64x2/ :f64x2)
+
+;;
+;; Built-in special forms (no defop needed):
+;;   (v128.load  ptr)           → :v128  — load 16 bytes from memory
+;;   (v128.store ptr val)       → void   — store 16 bytes to memory
+;;   (v128.const b0..b15)       → :v128  — 16-byte literal (i8x16 interpretation)
+;;
+;; Type-dispatched lane access (preferred — infers WAT op from vector subtype):
+;;   (extract_lane   lane vec)  — lanes from :i8x16/:i16x8 sign-extend to :i32
+;;   (extract_lane_u lane vec)  — unsigned zero-extend to :i32 (:i8x16/:i16x8 only)
+;;   (replace_lane   lane vec val) → same subtype as vec
+;;
+;; Named lane access (still available):
+;;   (i8x16.extract_lane_s  lane vec) → :i32
+;;   (i8x16.extract_lane_u  lane vec) → :i32
+;;   (i16x8.extract_lane_s  lane vec) → :i32
+;;   (i16x8.extract_lane_u  lane vec) → :i32
+;;   (i32x4.extract_lane    lane vec) → :i32
+;;   (i64x2.extract_lane    lane vec) → :i64
+;;   (f32x4.extract_lane    lane vec) → :f32
+;;   (f64x2.extract_lane    lane vec) → :f64
+;;   (i8x16.replace_lane    lane vec val) → :i8x16
+;;   (i16x8.replace_lane    lane vec val) → :i16x8
+;;   (i32x4.replace_lane    lane vec val) → :i32x4
+;;   (i64x2.replace_lane    lane vec val) → :i64x2
+;;   (f32x4.replace_lane    lane vec val) → :f32x4
+;;   (f64x2.replace_lane    lane vec val) → :f64x2
+;;   (i8x16.shuffle m0..m15 a b)          → :v128
+
+;; ── v128 memory ──────────────────────────────────────────────────────────────
+(defop v128-load  "v128.load"  (:i32)        :v128)  ;; load 16 bytes from ptr
+(defop v128-store "v128.store" (:i32 :v128)  :void)  ;; store 16 bytes to ptr
+
+;; ── v128 bitwise ─────────────────────────────────────────────────────────────
+(defop v-and    "v128.and"    (:v128 :v128) :v128)
+(defop v-or     "v128.or"     (:v128 :v128) :v128)
+(defop v-xor    "v128.xor"    (:v128 :v128) :v128)
+(defop v-not    "v128.not"    (:v128)       :v128)
+(defop v-andnot "v128.andnot" (:v128 :v128) :v128)
+
+;; ── i8x16 ────────────────────────────────────────────────────────────────────
+(defop i8x16-splat "i8x16.splat"  (:i32)  :i8x16)
+
+;; ── i16x8 ────────────────────────────────────────────────────────────────────
+(defop i16x8-splat "i16x8.splat"  (:i32)  :i16x8)
+
+;; ── i32x4 ────────────────────────────────────────────────────────────────────
+(defop i32x4-splat "i32x4.splat"  (:i32)  :i32x4)
+
+;; ── i64x2 ────────────────────────────────────────────────────────────────────
+(defop i64x2-splat "i64x2.splat"  (:i64)  :i64x2)
+
+;; ── f32x4 ────────────────────────────────────────────────────────────────────
+(defop f32x4-splat "f32x4.splat"  (:f32)           :f32x4)
+(defop f32x4-pmin  "f32x4.pmin"   (:f32x4 :f32x4)  :f32x4)  ;; IEEE min (NaN-propagating)
+(defop f32x4-pmax  "f32x4.pmax"   (:f32x4 :f32x4)  :f32x4)  ;; IEEE max
+
+;; ── f64x2 ────────────────────────────────────────────────────────────────────
+(defop f64x2-splat "f64x2.splat"  (:f64)  :f64x2)
+
+;; ── v128 boolean reductions ───────────────────────────────────────────────────
+(defop v128-any-true "v128.any_true" (:v128) :i32)
+(defop i8x16-all-true "i8x16.all_true" (:v128) :i32)
+(defop i16x8-all-true "i16x8.all_true" (:v128) :i32)
+(defop i32x4-all-true "i32x4.all_true" (:v128) :i32)
+(defop i64x2-all-true "i64x2.all_true" (:v128) :i32)
+
+;; ── Horizontal operations ─────────────────────────────────────────────────────
+(defop i32x4-dot-i16x8 "i32x4.dot_i16x8_s" (:v128 :v128) :v128)
+
+;; ── Type conversion ───────────────────────────────────────────────────────────
+;; (i32x4-trunc-sat-f32x4-s v) etc.
+(defop i32x4-trunc-sat-f32x4-s "i32x4.trunc_sat_f32x4_s" (:v128) :v128)
+(defop i32x4-trunc-sat-f32x4-u "i32x4.trunc_sat_f32x4_u" (:v128) :v128)
+(defop f32x4-convert-i32x4-s   "f32x4.convert_i32x4_s"   (:v128) :v128)
+(defop f32x4-convert-i32x4-u   "f32x4.convert_i32x4_u"   (:v128) :v128)
+
+;; ── Convenience macros ────────────────────────────────────────────────────────
+
+;; (f32x4.dot-product a b) — horizontal dot product of two f32x4 vectors → f32
+;; Multiplies element-wise then horizontally adds all four f32 lanes.
+;; Layout: a = (a0 a1 a2 a3), b = (b0 b1 b2 b3)
+;; result = a0*b0 + a1*b1 + a2*b2 + a3*b3
+(defmacro f32x4.dot-product (a b)
+  (let prod :f32x4 (* a b)
+    (let s01 :f32 (+ (f32x4.extract_lane 0 prod)
+                     (f32x4.extract_lane 1 prod))
+      (let s23 :f32 (+ (f32x4.extract_lane 2 prod)
+                       (f32x4.extract_lane 3 prod))
+        (+ s01 s23)))))
+
+;; ── Typed operator overloads ──────────────────────────────────────────────────────────────
+;; Short arithmetic operators dispatched by SIMD subtype.
+;; e.g. (+ a b) where a :i32x4  →  i32x4.add
+;;      (* a b) where a :f32x4  →  f32x4.mul
+;; Requires that locals / params are annotated with the subtype,
+;; not the generic :v128.
+
+;; :i8x16
+(defop +   "i8x16.add"     (:i8x16 :i8x16) :i8x16)
+(defop -   "i8x16.sub"     (:i8x16 :i8x16) :i8x16)
+(defop neg "i8x16.neg"     (:i8x16)        :i8x16)
+(defop abs "i8x16.abs"     (:i8x16)        :i8x16)
+
+;; :i16x8
+(defop +   "i16x8.add"     (:i16x8 :i16x8) :i16x8)
+(defop -   "i16x8.sub"     (:i16x8 :i16x8) :i16x8)
+(defop *   "i16x8.mul"     (:i16x8 :i16x8) :i16x8)
+(defop neg "i16x8.neg"     (:i16x8)        :i16x8)
+(defop abs "i16x8.abs"     (:i16x8)        :i16x8)
+
+;; :i32x4
+(defop +   "i32x4.add"     (:i32x4 :i32x4) :i32x4)
+(defop -   "i32x4.sub"     (:i32x4 :i32x4) :i32x4)
+(defop *   "i32x4.mul"     (:i32x4 :i32x4) :i32x4)
+(defop neg "i32x4.neg"     (:i32x4)        :i32x4)
+(defop abs "i32x4.abs"     (:i32x4)        :i32x4)
+
+;; :i64x2
+(defop +   "i64x2.add"     (:i64x2 :i64x2) :i64x2)
+(defop -   "i64x2.sub"     (:i64x2 :i64x2) :i64x2)
+(defop *   "i64x2.mul"     (:i64x2 :i64x2) :i64x2)
+(defop neg "i64x2.neg"     (:i64x2)        :i64x2)
+(defop abs "i64x2.abs"     (:i64x2)        :i64x2)
+
+;; :f32x4
+(defop +    "f32x4.add"    (:f32x4 :f32x4) :f32x4)
+(defop -    "f32x4.sub"    (:f32x4 :f32x4) :f32x4)
+(defop *    "f32x4.mul"    (:f32x4 :f32x4) :f32x4)
+(defop /    "f32x4.div"    (:f32x4 :f32x4) :f32x4)
+(defop neg  "f32x4.neg"    (:f32x4)        :f32x4)
+(defop abs  "f32x4.abs"    (:f32x4)        :f32x4)
+(defop sqrt "f32x4.sqrt"   (:f32x4)        :f32x4)
+(defop min  "f32x4.min"    (:f32x4 :f32x4) :f32x4)
+(defop max  "f32x4.max"    (:f32x4 :f32x4) :f32x4)
+
+;; :f64x2
+(defop +    "f64x2.add"    (:f64x2 :f64x2) :f64x2)
+(defop -    "f64x2.sub"    (:f64x2 :f64x2) :f64x2)
+(defop *    "f64x2.mul"    (:f64x2 :f64x2) :f64x2)
+(defop /    "f64x2.div"    (:f64x2 :f64x2) :f64x2)
+(defop neg  "f64x2.neg"    (:f64x2)        :f64x2)
+(defop abs  "f64x2.abs"    (:f64x2)        :f64x2)
+(defop sqrt "f64x2.sqrt"   (:f64x2)        :f64x2)
+(defop min  "f64x2.min"    (:f64x2 :f64x2) :f64x2)
+(defop max  "f64x2.max"    (:f64x2 :f64x2) :f64x2)
+
+;; ── Comparison operators ──────────────────────────────────────────────────────
+;; (= a b) where a :i32x4  →  i32x4.eq (lane-wise mask, same type out)
+;; (<s a b) — signed less-than; (<u a b) — unsigned less-than
+
+;; :i8x16
+(defop =   "i8x16.eq"   (:i8x16 :i8x16) :i8x16)
+(defop !=  "i8x16.ne"   (:i8x16 :i8x16) :i8x16)
+(defop <s  "i8x16.lt_s" (:i8x16 :i8x16) :i8x16)
+(defop <u  "i8x16.lt_u" (:i8x16 :i8x16) :i8x16)
+(defop >s  "i8x16.gt_s" (:i8x16 :i8x16) :i8x16)
+(defop >u  "i8x16.gt_u" (:i8x16 :i8x16) :i8x16)
+(defop <=s "i8x16.le_s" (:i8x16 :i8x16) :i8x16)
+(defop <=u "i8x16.le_u" (:i8x16 :i8x16) :i8x16)
+(defop >=s "i8x16.ge_s" (:i8x16 :i8x16) :i8x16)
+(defop >=u "i8x16.ge_u" (:i8x16 :i8x16) :i8x16)
+
+;; :i16x8
+(defop =   "i16x8.eq"   (:i16x8 :i16x8) :i16x8)
+(defop !=  "i16x8.ne"   (:i16x8 :i16x8) :i16x8)
+(defop <s  "i16x8.lt_s" (:i16x8 :i16x8) :i16x8)
+(defop <u  "i16x8.lt_u" (:i16x8 :i16x8) :i16x8)
+(defop >s  "i16x8.gt_s" (:i16x8 :i16x8) :i16x8)
+(defop >u  "i16x8.gt_u" (:i16x8 :i16x8) :i16x8)
+(defop <=s "i16x8.le_s" (:i16x8 :i16x8) :i16x8)
+(defop <=u "i16x8.le_u" (:i16x8 :i16x8) :i16x8)
+(defop >=s "i16x8.ge_s" (:i16x8 :i16x8) :i16x8)
+(defop >=u "i16x8.ge_u" (:i16x8 :i16x8) :i16x8)
+
+;; :i32x4
+(defop =   "i32x4.eq"   (:i32x4 :i32x4) :i32x4)
+(defop !=  "i32x4.ne"   (:i32x4 :i32x4) :i32x4)
+(defop <s  "i32x4.lt_s" (:i32x4 :i32x4) :i32x4)
+(defop <u  "i32x4.lt_u" (:i32x4 :i32x4) :i32x4)
+(defop >s  "i32x4.gt_s" (:i32x4 :i32x4) :i32x4)
+(defop >u  "i32x4.gt_u" (:i32x4 :i32x4) :i32x4)
+(defop <=s "i32x4.le_s" (:i32x4 :i32x4) :i32x4)
+(defop <=u "i32x4.le_u" (:i32x4 :i32x4) :i32x4)
+(defop >=s "i32x4.ge_s" (:i32x4 :i32x4) :i32x4)
+(defop >=u "i32x4.ge_u" (:i32x4 :i32x4) :i32x4)
+
+;; :i64x2
+(defop =  "i64x2.eq" (:i64x2 :i64x2) :i64x2)
+(defop != "i64x2.ne" (:i64x2 :i64x2) :i64x2)
+
+;; :f32x4
+(defop =  "f32x4.eq" (:f32x4 :f32x4) :f32x4)
+(defop != "f32x4.ne" (:f32x4 :f32x4) :f32x4)
+(defop <  "f32x4.lt" (:f32x4 :f32x4) :f32x4)
+(defop >  "f32x4.gt" (:f32x4 :f32x4) :f32x4)
+(defop <= "f32x4.le" (:f32x4 :f32x4) :f32x4)
+(defop >= "f32x4.ge" (:f32x4 :f32x4) :f32x4)
+
+;; :f64x2
+(defop =  "f64x2.eq" (:f64x2 :f64x2) :f64x2)
+(defop != "f64x2.ne" (:f64x2 :f64x2) :f64x2)
+(defop <  "f64x2.lt" (:f64x2 :f64x2) :f64x2)
+(defop >  "f64x2.gt" (:f64x2 :f64x2) :f64x2)
+(defop <= "f64x2.le" (:f64x2 :f64x2) :f64x2)
+(defop >= "f64x2.ge" (:f64x2 :f64x2) :f64x2)
+
+;; ── Shift operators ───────────────────────────────────────────────────────────
+;; (shl a n) where a :i32x4, n :i32  →  i32x4.shl
+
+;; :i8x16
+(defop shl   "i8x16.shl"   (:i8x16 :i32) :i8x16)
+(defop shr_s "i8x16.shr_s" (:i8x16 :i32) :i8x16)
+(defop shr_u "i8x16.shr_u" (:i8x16 :i32) :i8x16)
+
+;; :i16x8
+(defop shl   "i16x8.shl"   (:i16x8 :i32) :i16x8)
+(defop shr_s "i16x8.shr_s" (:i16x8 :i32) :i16x8)
+(defop shr_u "i16x8.shr_u" (:i16x8 :i32) :i16x8)
+
+;; :i32x4
+(defop shl   "i32x4.shl"   (:i32x4 :i32) :i32x4)
+(defop shr_s "i32x4.shr_s" (:i32x4 :i32) :i32x4)
+(defop shr_u "i32x4.shr_u" (:i32x4 :i32) :i32x4)
+
+;; :i64x2
+(defop shl   "i64x2.shl"   (:i64x2 :i32) :i64x2)
+(defop shr_s "i64x2.shr_s" (:i64x2 :i32) :i64x2)
+(defop shr_u "i64x2.shr_u" (:i64x2 :i32) :i64x2)

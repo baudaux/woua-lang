@@ -1,0 +1,28 @@
+;; @test math
+;; @feature lib/math.woua — sqrt, abs, floor, ceil, round, neg, min, max (intrinsics) + sin, cos, exp, log, pow (software)
+;; @expect
+;;   sqrt(2)       = 1.414214
+;;   abs(-3.14)    = 3.140000
+;;   floor(3.7)    = 3.000000
+;;   ceil(3.2)     = 4.000000
+;;   round(3.2)    = 3.000000
+;;   sin(pi/2)     = 1.000000
+;;   cos(0)        = 1.000000
+;;   exp(1)        = 2.718282
+;;   log(e)        = 1.000000
+;;   2^3           = 8.000000
+
+(include io)
+(include math)
+
+(defn main ()
+  (printf "sqrt(2)       = %f\n"  (sqrt  2.0))
+  (printf "abs(-3.14)    = %f\n"  (abs   -3.14))
+  (printf "floor(3.7)    = %f\n"  (floor 3.7))
+  (printf "ceil(3.2)     = %f\n"  (ceil  3.2))
+  (printf "round(3.2)    = %f\n"  (round 3.2))
+  (printf "sin(pi/2)     = %lf\n" (sin   1.5707963267948966f64))
+  (printf "cos(0)        = %lf\n" (cos   0.0f64))
+  (printf "exp(1)        = %lf\n" (exp   1.0f64))
+  (printf "log(e)        = %lf\n" (log   2.718281828459045f64))
+  (printf "2^3           = %lf\n" (pow   2.0f64 3.0f64)))

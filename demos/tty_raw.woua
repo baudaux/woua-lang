@@ -35,7 +35,7 @@
                   (printf "Press keys (q to quit):\r\n")
                   (let stop :i32 0
                     (while (= stop 0)
-                      (drop (fd_read 0 (as :i32 iov) 1 nread_ptr))
+                      (drop (fd_read STDIN (as :i32 iov) 1 nread_ptr))
                       (let nr :i32 (i32.load nread_ptr)
                         (if (> nr 0)
                           (let ch :u8 (i32.load8_u buf)

@@ -1,0 +1,65 @@
+;; svg_dump.woua — Static SVG dump for CLI testing.
+;;
+;; Writes a self-contained SVG document to stdout.
+;; Redirect to a file and open in a browser or image viewer to verify
+;; that the SVG library renders shapes correctly.
+;;
+;; Usage:
+;;   wasmtime --dir=. demos/out/svg_dump.wasm > /tmp/test.svg
+;;   xdg-open /tmp/test.svg
+;;   # or: firefox /tmp/test.svg
+
+(include svg)
+
+(defn main ()
+  (let buf :*SvgBuf (svg-buf-new 4096)
+
+    ;; Write a valid SVG root element to stdout
+    (__svg-str buf "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"300\" viewBox=\"0 0 400 300\">")
+    (__svg-byte buf 10)
+    (svg-flush-to buf STDOUT)
+
+    ;; Sky background
+    (svg-rect buf "bg" 0 0 400 300 "#87CEEB")
+    (svg-flush-to buf STDOUT)
+
+    ;; Ground strip
+    (svg-rect buf "ground" 0 240 400 60 "#228B22")
+    (svg-flush-to buf STDOUT)
+
+    ;; Sun
+    (svg-circle buf "sun" 340 50 30 "#FFD700")
+    (svg-flush-to buf STDOUT)
+
+    ;; Tree trunk
+    (svg-rect buf "trunk" 80 180 16 60 "#8B4513")
+    (svg-flush-to buf STDOUT)
+
+    ;; Tree canopy
+    (svg-circle buf "canopy" 88 165 36 "#006400")
+    (svg-flush-to buf STDOUT)
+
+    ;; Title text
+    (svg-text buf "title" 120 30 "#003366" "woua SVG dump")
+    (svg-flush-to buf STDOUT)
+
+    ;; A diagonal line
+    (svg-line buf "diag" 10 280 390 10 "#FF0000")
+    (svg-flush-to buf STDOUT)
+
+    ;; A transparent rectangle
+    (__svg-open-tag buf "rect" "box")
+    (__svg-attr-i buf "x" 160)
+    (__svg-attr-i buf "y" 80)
+    (__svg-attr-i buf "width" 80)
+    (__svg-attr-i buf "height" 60)
+    (__svg-attr-s buf "fill" "none")
+    (__svg-attr-s buf "stroke" "#0000CC")
+    (__svg-attr-s buf "stroke-width" "3")
+    (__svg-close-self buf)
+    (svg-flush-to buf STDOUT)
+
+    ;; Close the SVG document
+    (__svg-str buf "</svg>")
+    (__svg-byte buf 10)
+    (svg-flush-to buf STDOUT)))

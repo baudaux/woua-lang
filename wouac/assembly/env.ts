@@ -224,12 +224,18 @@ export class Env {
   // ── Errors accumulated during compilation ────────────────────────────────
   errors: Array<string> = new Array<string>();
 
+  // ── Compiler options ─────────────────────────────────────────────────────
+  noPeephole: bool = false;
+
   // ── Alignment helpers ────────────────────────────────────────────────────────
 
   alignOf(typeName: string): i32 {
     if (typeName == ":u8")                                               return 1;
     if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr") return 4;
     if (typeName == ":i64" || typeName == ":f64")                        return 8;
+    if (typeName == ":v128" || typeName == ":i8x16" || typeName == ":i16x8" ||
+        typeName == ":i32x4" || typeName == ":i64x2" ||
+        typeName == ":f32x4" || typeName == ":f64x2")                     return 16;
     if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
     // Embedded struct: align to first field
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1))) {
@@ -244,6 +250,9 @@ export class Env {
     if (typeName == ":u8")                                               return 1;
     if (typeName == ":i32" || typeName == ":f32" || typeName == ":ptr") return 4;
     if (typeName == ":i64" || typeName == ":f64")                        return 8;
+    if (typeName == ":v128" || typeName == ":i8x16" || typeName == ":i16x8" ||
+        typeName == ":i32x4" || typeName == ":i64x2" ||
+        typeName == ":f32x4" || typeName == ":f64x2")                     return 16;
     if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
     // Embedded struct: size from env.types
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1)))

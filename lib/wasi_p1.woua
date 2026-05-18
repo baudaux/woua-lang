@@ -38,6 +38,33 @@
 (defimport fd_prestat_get "wasi_snapshot_preview1" "fd_prestat_get" (:i32 :i32) :i32)
 ;; fd_prestat_dir_name(fd: i32, path: i32, path_len: i32) → errno
 (defimport fd_prestat_dir_name "wasi_snapshot_preview1" "fd_prestat_dir_name" (:i32 :i32 :i32) :i32)
+;; fd_advise(fd: i32, offset: i64, len: i64, advice: i32) → errno
+;; advice: 0=normal 1=sequential 2=random 3=noreuse 4=willneed 5=dontneed
+(defimport fd_advise "wasi_snapshot_preview1" "fd_advise" (:i32 :i64 :i64 :i32) :i32)
+;; fd_allocate(fd: i32, offset: i64, len: i64) → errno
+(defimport fd_allocate "wasi_snapshot_preview1" "fd_allocate" (:i32 :i64 :i64) :i32)
+;; fd_datasync(fd: i32) → errno  — flush data without updating inode metadata
+(defimport fd_datasync "wasi_snapshot_preview1" "fd_datasync" (:i32) :i32)
+;; fd_fdstat_get(fd: i32, stat_ptr: i32) → errno
+;; stat_ptr → 24-byte fdstat: [u8 fs_filetype, pad, u16 fs_flags, pad×4, u64 fs_rights_base, u64 fs_rights_inheriting]
+(defimport fd_fdstat_get "wasi_snapshot_preview1" "fd_fdstat_get" (:i32 :i32) :i32)
+;; fd_fdstat_set_flags(fd: i32, flags: i32) → errno  — flags is fdflags (u16)
+(defimport fd_fdstat_set_flags "wasi_snapshot_preview1" "fd_fdstat_set_flags" (:i32 :i32) :i32)
+;; fd_filestat_get(fd: i32, buf_ptr: i32) → errno
+;; buf_ptr → 64-byte filestat: dev:u64 ino:u64 filetype:u8 pad:7 nlink:u64 size:u64 atim:u64 mtim:u64 ctim:u64
+(defimport fd_filestat_get "wasi_snapshot_preview1" "fd_filestat_get" (:i32 :i32) :i32)
+;; fd_filestat_set_size(fd: i32, size: i64) → errno  — truncate or extend file
+(defimport fd_filestat_set_size "wasi_snapshot_preview1" "fd_filestat_set_size" (:i32 :i64) :i32)
+;; fd_filestat_set_times(fd: i32, atim: i64, mtim: i64, fst_flags: i32) → errno
+;; fst_flags bits: 1=set_atim 2=set_atim_now 4=set_mtim 8=set_mtim_now
+(defimport fd_filestat_set_times "wasi_snapshot_preview1" "fd_filestat_set_times" (:i32 :i64 :i64 :i32) :i32)
+;; fd_pread(fd: i32, iovs: i32, iovs_len: i32, offset: i64, nread_ptr: i32) → errno
+(defimport fd_pread "wasi_snapshot_preview1" "fd_pread" (:i32 :i32 :i32 :i64 :i32) :i32)
+;; fd_pwrite(fd: i32, iovs: i32, iovs_len: i32, offset: i64, nwritten_ptr: i32) → errno
+(defimport fd_pwrite "wasi_snapshot_preview1" "fd_pwrite" (:i32 :i32 :i32 :i64 :i32) :i32)
+;; fd_readdir(fd: i32, buf: i32, buf_len: i32, cookie: i64, bufused_ptr: i32) → errno
+;; cookie: start with 0; dirent layout: [u64 d_next, u64 d_ino, u32 d_namlen, u8 d_type, pad×3, name bytes]
+(defimport fd_readdir "wasi_snapshot_preview1" "fd_readdir" (:i32 :i32 :i32 :i64 :i32) :i32)
 
 ;; ── Filesystem ────────────────────────────────────────────────────────────────
 ;; path_open(dirfd: i32, dirflags: i32, path: i32, path_len: i32,
@@ -53,6 +80,47 @@
 ;; path_rename(old_dirfd: i32, old_path: i32, old_path_len: i32,
 ;;             new_dirfd: i32, new_path: i32, new_path_len: i32) → errno
 (defimport path_rename "wasi_snapshot_preview1" "path_rename" (:i32 :i32 :i32 :i32 :i32 :i32) :i32)
+;; path_filestat_get(dirfd: i32, flags: i32, path: i32, path_len: i32, buf: i32) → errno
+;; flags: lookupflags — bit 0: follow symlinks; buf → 64-byte filestat (same layout as fd_filestat_get)
+(defimport path_filestat_get "wasi_snapshot_preview1" "path_filestat_get" (:i32 :i32 :i32 :i32 :i32) :i32)
+;; path_filestat_set_times(dirfd: i32, flags: i32, path: i32, path_len: i32,
+;;                         atim: i64, mtim: i64, fst_flags: i32) → errno
+(defimport path_filestat_set_times "wasi_snapshot_preview1" "path_filestat_set_times" (:i32 :i32 :i32 :i32 :i64 :i64 :i32) :i32)
+;; path_link(old_fd: i32, old_flags: i32, old_path: i32, old_path_len: i32,
+;;           new_fd: i32, new_path: i32, new_path_len: i32) → errno
+(defimport path_link "wasi_snapshot_preview1" "path_link" (:i32 :i32 :i32 :i32 :i32 :i32 :i32) :i32)
+;; path_readlink(fd: i32, path: i32, path_len: i32,
+;;               buf: i32, buf_len: i32, bufused_ptr: i32) → errno
+(defimport path_readlink "wasi_snapshot_preview1" "path_readlink" (:i32 :i32 :i32 :i32 :i32 :i32) :i32)
+;; path_remove_directory(fd: i32, path: i32, path_len: i32) → errno
+(defimport path_remove_directory "wasi_snapshot_preview1" "path_remove_directory" (:i32 :i32 :i32) :i32)
+;; path_symlink(old_path: i32, old_path_len: i32, fd: i32, new_path: i32, new_path_len: i32) → errno
+(defimport path_symlink "wasi_snapshot_preview1" "path_symlink" (:i32 :i32 :i32 :i32 :i32) :i32)
+
+;; ── Sockets ───────────────────────────────────────────────────────────────────
+;; sock_accept(fd: i32, flags: i32, connection_ptr: i32) → errno
+;; flags: fdflags (u16); connection_ptr → i32 out fd
+(defimport sock_accept "wasi_snapshot_preview1" "sock_accept" (:i32 :i32 :i32) :i32)
+;; sock_recv(fd: i32, ri_data: i32, ri_data_len: i32, ri_flags: i32,
+;;           ro_datalen_ptr: i32, ro_flags_ptr: i32) → errno
+;; ri_data is an iovec array; ri_flags: riflags (u16); ro_flags_ptr → u16 out flags
+(defimport sock_recv "wasi_snapshot_preview1" "sock_recv" (:i32 :i32 :i32 :i32 :i32 :i32) :i32)
+;; sock_send(fd: i32, si_data: i32, si_data_len: i32, si_flags: i32,
+;;           so_datalen_ptr: i32) → errno
+;; si_data is a ciovec array; si_flags: siflags (u16); so_datalen_ptr → u32 out bytes sent
+(defimport sock_send "wasi_snapshot_preview1" "sock_send" (:i32 :i32 :i32 :i32 :i32) :i32)
+;; sock_shutdown(fd: i32, how: i32) → errno
+;; how: sdflags bits — 0x1=shut_rd  0x2=shut_wr
+(defimport sock_shutdown "wasi_snapshot_preview1" "sock_shutdown" (:i32 :i32) :i32)
+
+;; ── Poll ──────────────────────────────────────────────────────────────────────
+;; poll_oneoff(in_ptr: i32, out_ptr: i32, nsubscriptions: i32, nevents_ptr: i32) → errno
+;; in_ptr → array of nsubscriptions × 48-byte subscription structs
+;; out_ptr → array of nsubscriptions × 32-byte event structs (output)
+;; nevents_ptr → i32 out: number of events written
+;; subscription layout (48 bytes): [u64 userdata, u8 tag, pad×7, union(clock|fd_readwrite)]
+;; event layout (32 bytes):        [u64 userdata, u16 error, u8 type, pad×5, u64 nbytes, u16 flags, pad×6]
+(defimport poll_oneoff "wasi_snapshot_preview1" "poll_oneoff" (:i32 :i32 :i32 :i32) :i32)
 
 ;; ── Clock ─────────────────────────────────────────────────────────────────────
 ;; clock_time_get(clock_id: i32, precision: i64, time_ptr: i32) → errno

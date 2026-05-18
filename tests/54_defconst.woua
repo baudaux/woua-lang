@@ -3,7 +3,7 @@
 ;;   the name can be used in expressions as if it were the literal value;
 ;;   works for :i32, :f32, :f64, :i64, and hex literals
 ;; @expect
-;;   MAX_LEN=256
+;;   MAX-LEN=256
 ;;   FLAG=1
 ;;   sum=356
 ;;   pi_x100=314
@@ -11,15 +11,15 @@
 
 (include io)
 
-(defconst MAX_LEN 256)
+(defconst MAX-LEN 256)
 (defconst FLAG    1)
 (defconst BASE    100)
 (defconst PI      3.14)
 (defconst BIG     1000000i64)
 
 (defn main () :void
-  (printf "MAX_LEN=%d\n" MAX_LEN)
+  (printf "MAX-LEN=%d\n" MAX-LEN)
   (printf "FLAG=%d\n"    FLAG)
-  (printf "sum=%d\n"     (+ MAX_LEN BASE))
+  (printf "sum=%d\n"     (+ MAX-LEN BASE))
   (printf "pi_x100=%d\n" (as :i32 (* PI 100.0)))
   (printf "big=%ld\n"    BIG))

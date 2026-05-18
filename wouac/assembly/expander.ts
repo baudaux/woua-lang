@@ -5,9 +5,9 @@
 // Other forms are passed through to codegen.
 
 import { Node, ListNode, SymbolNode, IntNode, FloatNode, StringNode, RegexNode,
-         MacroListNode, CommentNode,
+         MacroListNode, CommentNode, V128Node,
          TAG_INT, TAG_FLOAT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST,
-         TAG_COMMENT } from "./ast";
+         TAG_COMMENT, TAG_V128 } from "./ast";
 import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo, ProtocolInfo, ProtocolMethodSig, GlobalInfo } from "./env";
 
 // Register one WAT global per leaf field of a value-type struct.
@@ -122,6 +122,8 @@ function expandNode(node: Node, env: Env): Node {
   if (node.tag == TAG_MACROLIST) return node;
   // CommentNodes pass through unchanged to codegen.
   if (node.tag == TAG_COMMENT) return node;
+  // V128Nodes (SIMD vector literals) pass through unchanged to codegen.
+  if (node.tag == TAG_V128) return node;
   // Bare symbol that names a zero-param macro (defconst) → expand immediately.
   if (node.tag == TAG_SYMBOL) {
     const symName = (node as SymbolNode).name;
@@ -326,6 +328,8 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
       newItems.push(substituteNode(ml.items[k], subst, env));
     return new MacroListNode(newItems);
   }
+  // V128Nodes pass through unchanged (no substitutable parts).
+  if (node.tag == TAG_V128) return node;
   if (node.tag == TAG_SYMBOL) {
     const name = (node as SymbolNode).name;
     if (subst.has(name)) {
@@ -408,7 +412,12 @@ function printfArgTypes(fmt: string): Array<string> {
       i++;
       const spec = fmt.charAt(i);
       if (spec == "d" || spec == "i" || spec == "s" || spec == "c") { types.push("i32"); i++; }
-      else if (spec == "l") { types.push("i64"); i += 2; }
+      else if (spec == "f") { types.push("f32"); i++; }
+      else if (spec == "l") {
+        i++; // skip 'l'
+        if (i < fmt.length && fmt.charAt(i) == "f") { types.push("f64"); i++; }
+        else { types.push("i64"); i++; }
+      }
       else i++;
     } else {
       i++;
@@ -438,7 +447,12 @@ function parsePrintfFormat(fmt: string, argTypes: Array<string>, env: Env): Arra
       if (spec == "d" || spec == "i") { segments.push("A:i32");  argTypes.push("i32"); i++; }
       else if (spec == "s")           { segments.push("A:str");  argTypes.push("i32"); argTypes.push("i32"); i++; }
       else if (spec == "c")           { segments.push("A:char"); argTypes.push("i32"); i++; }
-      else if (spec == "l")           { i++; i++; segments.push("A:i64"); argTypes.push("i64"); }
+      else if (spec == "f")           { segments.push("A:f32");  argTypes.push("f32"); i++; }
+      else if (spec == "l") {
+        i++; // skip 'l'
+        if (i < fmt.length && fmt.charAt(i) == "f") { segments.push("A:f64"); argTypes.push("f64"); i++; }
+        else { segments.push("A:i64"); argTypes.push("i64"); i++; }
+      }
       else if (spec == "%")           { litBuf += "%"; i++; }
       else                            { litBuf += "%" + spec; i++; }
     } else {
@@ -529,6 +543,26 @@ function buildPrintfFunc(fmt: string, funcName: string, env: Env): string {
       wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
       wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
       wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (i32.const 1))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    } else if (seg == "A:f32") {
+      // f32 → decimal string via $f32->str (returns two-value :str)
+      wat += "    (call $f32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (local.get $__s_len))\n";
+      wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
+      curArg++;
+    } else if (seg == "A:f64") {
+      // f64 → decimal string via $f64->str (returns two-value :str)
+      wat += "    (call $f64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += "    (local.set $__iov (call $alloc (i32.const 12)))\n";
+      wat += "    (i32.store (local.get $__iov) (local.get $__s_ptr))\n";
+      wat += "    (i32.store (i32.add (local.get $__iov) (i32.const 4)) (local.get $__s_len))\n";
       wat += "    (drop (call $fd_write (i32.const 1) (local.get $__iov) (i32.const 1) (i32.add (local.get $__iov) (i32.const 8))))\n";
       curArg++;
     }

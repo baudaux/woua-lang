@@ -1,0 +1,17 @@
+;; @test simd_v128_const
+;; @feature SIMD vector literals (1:2:3:4i32x4 syntax) and extract_lane
+;; @expect
+;;   lane0=10
+;;   lane1=20
+;;   lane2=30
+;;   lane3=40
+
+(include io)
+(include simd)
+
+(defn main () :void
+  (let v :v128 10:20:30:40i32x4
+    (printf "lane0=%d\n" (extract_lane 0 v))
+    (printf "lane1=%d\n" (extract_lane 1 v))
+    (printf "lane2=%d\n" (extract_lane 2 v))
+    (printf "lane3=%d\n" (extract_lane 3 v))))

@@ -335,6 +335,7 @@ export function _start(): void {
   let inputArg  = "";
   let outputArg = "";
   let emitMap   = false;
+  let noPeephole = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] == "--help" || args[i] == "-h") {
       Console.write(
@@ -347,6 +348,7 @@ export function _start(): void {
         "  source.woua         Input source file\n" +
         "  -o, --output <file> Output file (default: stdout)\n" +
         "  -map                Write a <output>.map file with static memory layout\n" +
+        "  --no-peephole       Disable WAT peephole optimizer\n" +
         "  --lib <dir>         Library directory (default: lib/)\n" +
         "  --help, -h          Show this help message\n" +
         "  --version, -v       Show compiler version\n" +
@@ -375,6 +377,8 @@ export function _start(): void {
       i++;
     } else if (args[i] == "-map") {
       emitMap = true;
+    } else if (args[i] == "--no-peephole") {
+      noPeephole = true;
     } else if (inputArg == "") {
       inputArg = args[i];
     }
@@ -402,6 +406,7 @@ export function _start(): void {
 
   // -- Pipeline: readAndResolve -> expand -> codegen --------------------------
   const env = new Env();
+  env.noPeephole = noPeephole;
 
   const inputDir = inputArg != "" ? dirName(inputArg) : "";
   const included = new Set<string>();

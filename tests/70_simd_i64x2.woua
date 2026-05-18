@@ -1,0 +1,36 @@
+;; @test simd_i64x2
+;; @feature i64x2 arithmetic: +, -, *, neg, i64x2-splat, extract_lane
+;; a=(10 20) b=(3 7)
+;;   add: 13 27
+;;   sub: 7 13
+;;   mul: 30 140
+;;   neg: -10 -20
+;;   splat 5: 5 5
+;; @expect
+;;   add: 13 27
+;;   sub: 7 13
+;;   mul: 30 140
+;;   neg: -10 -20
+;;   splat: 5 5
+
+(include io)
+(include simd)
+
+(defn main () :void
+  (let a :i64x2 10:20i64x2
+    (let b :i64x2 3:7i64x2
+      (let ra :i64x2 (+ a b)
+        (let rs :i64x2 (- a b)
+          (let rm :i64x2 (* a b)
+            (let rn :i64x2 (neg a)
+              (let sp :i64x2 (i64x2-splat 5i64)
+                (printf "add: %ld %ld\n"
+                  (extract_lane 0 ra) (extract_lane 1 ra))
+                (printf "sub: %ld %ld\n"
+                  (extract_lane 0 rs) (extract_lane 1 rs))
+                (printf "mul: %ld %ld\n"
+                  (extract_lane 0 rm) (extract_lane 1 rm))
+                (printf "neg: %ld %ld\n"
+                  (extract_lane 0 rn) (extract_lane 1 rn))
+                (printf "splat: %ld %ld\n"
+                  (extract_lane 0 sp) (extract_lane 1 sp))))))))))

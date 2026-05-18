@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>woua SVG demo</title>
+  <style>
+    body  { font-family: sans-serif; margin: 2rem; background: #f5f5f5; }
+    h2    { margin-bottom: 0.5rem; }
+    #canvas svg { display: block; border: 1px solid #bbb; border-radius: 4px; }
+    #status { margin-top: 0.5rem; color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h2>woua SVG demo</h2>
+  <div id="canvas"></div>
+  <p id="status">Loading…</p>
+
+  <script type="module">
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+
+    // ── Set up the <svg> element ────────────────────────────────────────────
+    const host = document.getElementById('canvas');
+    const svg  = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('width',   '400');
+    svg.setAttribute('height',  '300');
+    svg.setAttribute('viewBox', '0 0 400 300');
+    host.appendChild(svg);
+
+    const defs = document.createElementNS(SVG_NS, 'defs');
+    svg.insertBefore(defs, svg.firstChild);
+
+    let insertionParent = svg;
+
+    // ── SVG protocol message processor ─────────────────────────────────────
+    // Same logic as svg-bridge.js but running on the main thread.
+    function processMessage(line) {
+      line = line.trim();
+      if (!line) return;
+
+      // Directive: <!...>
+      if (line.startsWith('<!')) {
+        const inner = line.slice(2, -1).trim();
+        if (inner === 'clear') {
+          for (const c of [...svg.childNodes]) if (c !== defs) svg.removeChild(c);
+          insertionParent = svg;
+          return;
+        }
+        if (inner === 'parent-root') { insertionParent = svg; return; }
+        if (inner.startsWith('remove ')) {
+          const el = document.getElementById(inner.slice(7).trim());
+          el?.parentNode.removeChild(el);
+          return;
+        }
+        if (inner.startsWith('parent ')) {
+          insertionParent = document.getElementById(inner.slice(7).trim()) ?? svg;
+          return;
+        }
+        if (inner.startsWith('style ')) {
+          const rest = inner.slice(6), sp = rest.indexOf(' ');
+          if (sp !== -1) document.getElementById(rest.slice(0, sp))
+            ?.setAttribute('style', rest.slice(sp + 1));
+          return;
+        }
+        if (inner.startsWith('transform ')) {
+          const rest = inner.slice(10), sp = rest.indexOf(' ');
+          if (sp !== -1) document.getElementById(rest.slice(0, sp))
+            ?.setAttribute('transform', rest.slice(sp + 1));
+          return;
+        }
+        if (inner.startsWith('attr ')) {
+          const rest = inner.slice(5);
+          const sp1 = rest.indexOf(' ');
+          if (sp1 !== -1) {
+            const id    = rest.slice(0, sp1);
+            const rest2 = rest.slice(sp1 + 1);
+            const sp2   = rest2.indexOf(' ');
+            if (sp2 !== -1)
+              document.getElementById(id)
+                ?.setAttribute(rest2.slice(0, sp2), rest2.slice(sp2 + 1));
+          }
+          return;
+        }
+        return; // unknown directive
+      }
+
+      // SVG element: self-closing or element-with-text
+      let tagName, attrsStr, textContent = null;
+
+      const fullMatch = line.match(
+        /^<([a-zA-Z][a-zA-Z0-9]*)\s+([^>]*)>([^<]*)<\/[a-zA-Z][a-zA-Z0-9]*>$/
+      );
+      if (fullMatch) {
+        [, tagName, attrsStr, textContent] = fullMatch;
+      } else {
+        const selfMatch = line.match(/^<([a-zA-Z][a-zA-Z0-9]*)\s*(.*?)\s*\/>$/);
+        if (!selfMatch) return;
+        [, tagName, attrsStr] = selfMatch;
+      }
+
+      const attrs  = {};
+      const attrRe = /([a-zA-Z][a-zA-Z0-9_:-]*)="([^"]*)"/g;
+      let m;
+      while ((m = attrRe.exec(attrsStr)) !== null) attrs[m[1]] = m[2];
+
+      const id = attrs['id'];
+      if (!id) return;
+
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElementNS(SVG_NS, tagName);
+        insertionParent.appendChild(el);
+      }
+      for (const [k, val] of Object.entries(attrs)) el.setAttribute(k, val);
+      if (textContent !== null) el.textContent = textContent;
+    }
+
+    // ── Spawn the Web Worker ────────────────────────────────────────────────
+    const status = document.getElementById('status');
+
+    const worker = new Worker(
+      new URL('./svg_worker.js', import.meta.url),
+      { type: 'module' }
+    );
+
+    worker.onmessage = ({ data }) => {
+      if (data.type === 'svg')   processMessage(data.line);
+      if (data.type === 'exit')  status.textContent = `Done (exit ${data.code}).`;
+      if (data.type === 'error') status.textContent = `Error: ${data.message}`;
+    };
+
+    worker.postMessage({ type: 'start', wasmUrl: 'out/svg_demo.wasm' });
+    status.textContent = 'Running… (~10 s animation)';
+  </script>
+</body>
+</html>
