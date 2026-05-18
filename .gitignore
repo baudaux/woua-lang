@@ -3,6 +3,7 @@ out/*
 !out/.keepit
 dist/*
 !dist/.keepit
+tmp/
 *.wat
 *.wasm
 *.map
