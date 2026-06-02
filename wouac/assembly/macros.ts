@@ -83,11 +83,11 @@ export function expandDefstatic(args: Array<Node>, env: Env): string {
       return "";
     }
 
-    // :bytes — reserve N zeroed bytes
+    // :bytes — reserve N zeroed bytes, 8-byte aligned so embedded i32/i64/ptr fields work correctly
     if (typeName == ":bytes") {
       if (args.length < 3) return watError("defstatic :bytes requires a size");
       const size = i32((args[2] as IntNode).value);
-      const ptr  = env.allocate(size, 1);
+      const ptr  = env.allocate(size, 8);
       env.statics.set(name, new StaticInfo(ptr, size, ":bytes"));
       return "";
     }
@@ -186,12 +186,12 @@ export function expandFieldGet(typeName: string, fieldName: string,
                                 ptr: string, env: Env): string {
   if (!env.types.has(typeName)) return watError("unknown type: " + typeName);
 
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   if (!typeInfo.fields.has(fieldName)) {
     return watError(typeName + " has no field: " + fieldName);
   }
 
-  const field   = typeInfo.fields.get(fieldName)!;
+  const field   = typeInfo.fields.get(fieldName);
   const ptrExpr = field.offset == 0
     ? ptr
     : watI32Add(ptr, watI32Const(field.offset));
@@ -215,12 +215,12 @@ export function expandFieldSet(typeName: string, fieldName: string,
                                 ptr: string, val: string, env: Env): string {
   if (!env.types.has(typeName)) return watError("unknown type: " + typeName);
 
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   if (!typeInfo.fields.has(fieldName)) {
     return watError(typeName + " has no field: " + fieldName);
   }
 
-  const field   = typeInfo.fields.get(fieldName)!;
+  const field   = typeInfo.fields.get(fieldName);
   const ptrExpr = field.offset == 0
     ? ptr
     : watI32Add(ptr, watI32Const(field.offset));
@@ -252,11 +252,11 @@ function watError(msg: string): string {
 // Recursively handles embedded structs.
 function encodeStructBytes(ctor: ListNode, typeName: string, env: Env): string {
   if (!env.types.has(typeName)) return "";
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   const fnames   = typeInfo.fieldNames;
   let bytes      = "";
   for (let fi = 0; fi < fnames.length; fi++) {
-    const field    = typeInfo.fields.get(fnames[fi])!;
+    const field    = typeInfo.fields.get(fnames[fi]);
     const argNode  = ctor.children[fi + 1]; // +1 to skip constructor name
     const ft       = field.typeName;
     // Padding to field offset: each byteEscape() produces 3 chars (\xx),

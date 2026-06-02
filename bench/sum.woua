@@ -11,7 +11,7 @@
     (let sum :i64 0i64
       (let i :i64 0i64
         (while (< i 100000000i64)
-          (set! sum (xor sum (* i i)))
+          (set! sum (^ sum (* i i)))
           (set! i (+ i 1i64)))
         (let elapsed :i64 (- (time-now-ns) start)
 (printf "sum = %ld, time = %ld ms\n"

@@ -1,0 +1,29 @@
+;; @test unsigned-ops
+;; @feature divu, %%, %%u, >>u/shru, <u/>u/<=u/>=u unsigned operators
+;; @expect
+;;   7 % 3 = 1
+;;   7 %u 3 = 1
+;;   -1 divu 2 = 2147483647
+;;   255 >>u 1 = 127
+;;   255 shru 1 = 127
+;;   -1 <u 1 = 0
+;;   -1 < 1 = 1
+;;   -1 >u 1 = 1
+;;   -1 > 1 = 0
+;;   2 <=u 2 = 1
+;;   2 >=u 2 = 1
+
+(include io)
+
+(defn main ()
+  (printf "7 % 3 = %d\n"       (% 7 3))
+  (printf "7 %u 3 = %d\n"      (%u 7 3))
+  (printf "-1 divu 2 = %d\n"   (divu -1 2))
+  (printf "255 >>u 1 = %d\n"   (>>u 255 1))
+  (printf "255 shru 1 = %d\n"  (shru 255 1))
+  (printf "-1 <u 1 = %d\n"     (<u -1 1))
+  (printf "-1 < 1 = %d\n"      (< -1 1))
+  (printf "-1 >u 1 = %d\n"     (>u -1 1))
+  (printf "-1 > 1 = %d\n"      (> -1 1))
+  (printf "2 <=u 2 = %d\n"     (<=u 2 2))
+  (printf "2 >=u 2 = %d\n"     (>=u 2 2)))

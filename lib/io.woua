@@ -10,17 +10,33 @@
 (defconst STDERR 2)
 
 ;; Iovec: WASI scatter/gather I/O vector (wasi_ciovec_t layout).
-;; An extra 4-byte nwritten slot is allocated after the struct at runtime.
+;; An extra 4-byte nwritten slot sits immediately after the struct in __iov.
 (deftype Iovec
   (base :ptr)
   (len  :i32))
 
-;; write is a macro: allocates an Iovec (+4 nwritten) at runtime via alloc,
-;; fills the fields by name, then calls fd_write.
-;; (sizeof Iovec) is a compile-time intrinsic: resolves to the struct byte size.
-;; (as :i32 ...) casts the Iovec pointer to the raw i32 expected by fd_write.
+;; Static scratch buffers shared by write, print-char, read-line, pread,
+;; pwrite, sock-recv, sock-send — allocated once in the static data section.
+;;
+;; TODO: for multi-threaded use these would need per-thread buffers; a single
+;;       static set is safe for single-threaded programs.
+(defstatic __iov        :bytes 12)  ;; Iovec (8 bytes) + 4-byte nwritten/nread slot
+(defstatic __pc-byte    :bytes 1)   ;; single-byte scratch for print-char / assert newline
+(defstatic __fd-out     :i32)       ;; 4-byte scratch for fd-returning syscalls
+(defstatic __ro-flags   :i32)       ;; 4-byte scratch for sock_recv ri_flags_out
+(defstatic __prestat    :bytes 8)   ;; 8-byte wasi_prestat_t scratch
+(defstatic __scratch-256  :bytes 256) ;; path scratch shared by open/create/remove/stat
+(defstatic __scratch-512  :bytes 512) ;; path scratch for rename-file (two 256-byte halves)
+(defstatic __filestat     :bytes 64)  ;; wasi_filestat_t scratch for file-size
+(defstatic __poll2-subs   :bytes 96)  ;; 2 × 48-byte subscriptions for poll-fd-read/write
+(defstatic __poll2-evts   :bytes 64)  ;; 2 × 32-byte events
+(defstatic __poll2-nevt   :i32)       ;; event count output
+(defstatic __args-argc-s  :i32)       ;; 4-byte scratch for args_sizes_get
+(defstatic __args-bufsz-s :i32)       ;; 4-byte scratch for args_sizes_get
+
+;; write is a macro: uses the static __iov scratch (no heap allocation).
 (defmacro write (fd ptr len)
-  (let __write_iov :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let __write_iov :*Iovec (static-ptr __iov)
     (Iovec/base! __write_iov ptr)
     (Iovec/len!  __write_iov len)
     (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
@@ -52,7 +68,7 @@
 
 ;; print-char: print a single byte value as a character to stdout.
 (defmacro print-char (c)
-  (let __pc_buf :ptr (alloc 4)
+  (let __pc_buf :ptr (static-ptr __pc-byte)
     (i32.store8 __pc_buf c)
     (write 1 __pc_buf 1)))
 
@@ -65,7 +81,7 @@
 ;; (assert cond "message")
 (defmacro assert (cond msg)
   (if (not cond)
-    (let __assert_nl :ptr (alloc 1)
+    (let __assert_nl :ptr (static-ptr __pc-byte)
       (i32.store8 __assert_nl 10)
       (write 2 (static-ptr "assertion failed: ") (static-len "assertion failed: "))
       (write 2 (static-ptr msg) (static-len msg))
@@ -122,7 +138,7 @@
 ;; Strips the trailing newline. Returns a str pointing into buf,
 ;; or a zero-length str on EOF.
 (defn read-line (fd buf maxlen) :str
-  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov      :*Iovec (static-ptr __iov)
     (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/len! iov 1)
       (let len  :i32 0
@@ -147,8 +163,8 @@
 ;; Load args from WASI once and store into the static cache.
 (defn __args-init ()
   (if (= (i32.load (static-ptr __args_argv)) 0)
-    (let argc_slot :ptr (alloc 4)
-      (let buf_slot  :ptr (alloc 4)
+    (let argc_slot :ptr (static-ptr __args-argc-s)
+      (let buf_slot  :ptr (static-ptr __args-bufsz-s)
         (drop (args_sizes_get argc_slot buf_slot))
         (let argc   :i32 (i32.load argc_slot)
           (let buf_sz :i32 (i32.load buf_slot)
@@ -187,7 +203,7 @@
 (defn find-preopen (name :str buf :ptr buf-len :i32)
   (let name-ptr :ptr (str/ptr name)
     (let name-len :i32 (str/len name)
-      (let prestat :ptr (alloc 8)
+      (let prestat :ptr (static-ptr __prestat)
         (let fd     :i32 3
           (let result :i32 -1
             (let stop   :i32 0
@@ -238,7 +254,7 @@
 (defn resolve-path (path :str scratch :ptr scratch-len :i32) :*ResolvedPath
   (let path-ptr :ptr (str/ptr path)
     (let path-len :i32 (str/len path)
-      (let prestat :ptr (alloc 8)
+      (let prestat :ptr (static-ptr __prestat)
         (let res :*ResolvedPath (alloc (sizeof ResolvedPath))
           (ResolvedPath/fd!   res -1)
           (ResolvedPath/rptr! res path-ptr)
@@ -252,7 +268,7 @@
                       (if (<= name-len scratch-len)
                         (progn
                           (drop (fd_prestat_dir_name fd scratch name-len))
-                          (if (and (= name-len 1) (= (i32.load8_u scratch) 46))
+                          (if (& (= name-len 1) (= (i32.load8_u scratch) 46))
                             ;; preopen is "." — matches everything; lowest priority
                             ;; only use it if nothing better was found yet
                             (if (= (ResolvedPath/fd res) -1)
@@ -263,7 +279,7 @@
                                 (set! fd (+ fd 1)))
                               (set! fd (+ fd 1)))
                             ;; compare bytes of preopen name against path prefix
-                            (if (and (>= path-len (+ name-len 1))
+                            (if (& (>= path-len (+ name-len 1))
                                      (= (i32.load8_u (+ path-ptr name-len)) 47))
                               ;; path starts with "name/" — check each byte
                               (let i     :i32 0
@@ -308,7 +324,7 @@
 ;;   readonly = 1 → rights: FD_READ | FD_SEEK | FD_TELL  (2|4|32 = 38)
 ;;   readonly = 0 → above + FD_DATASYNC | FD_SYNC | FD_WRITE (1|16|64 = 81, total 119)
 (defn open-file-at (dirfd :i32 path :str readonly :i32)
-  (let fd-out :ptr (alloc 4)
+  (let fd-out :ptr (static-ptr __fd-out)
     (let rights :i64 (if readonly 38i64 119i64)
       (let err :i32 (path_open dirfd 1 (str/ptr path) (str/len path) 0 rights rights 0 fd-out)
         (if (= err 0)
@@ -319,7 +335,7 @@
 ;; Open path, splitting off the preopen prefix automatically.
 ;; e.g. (open-file "tmp/data.txt" 1) opens "data.txt" relative to the "tmp" preopen.
 (defn open-file (path :str readonly :i32)
-  (let scratch :ptr (alloc 256)
+  (let scratch :ptr (static-ptr __scratch-256)
     (let r :*ResolvedPath (resolve-path path scratch 256)
       (if (= (ResolvedPath/fd r) -1)
         -1
@@ -329,7 +345,7 @@
 ;; (create-file-at dirfd path) → fd (i32, negative = errno)
 ;; Low-level: create/truncate path relative to an already-known preopen dirfd.
 (defn create-file-at (dirfd :i32 path :str)
-  (let fd-out :ptr (alloc 4)
+  (let fd-out :ptr (static-ptr __fd-out)
     (let err :i32 (path_open dirfd 1 (str/ptr path) (str/len path) 9 119i64 119i64 0 fd-out)
       (if (= err 0)
         (i32.load fd-out)
@@ -338,7 +354,7 @@
 ;; (create-file path) → fd (i32, negative on error)
 ;; Create or truncate path, splitting off the preopen prefix automatically.
 (defn create-file (path :str)
-  (let scratch :ptr (alloc 256)
+  (let scratch :ptr (static-ptr __scratch-256)
     (let r :*ResolvedPath (resolve-path path scratch 256)
       (if (= (ResolvedPath/fd r) -1)
         -1
@@ -353,7 +369,7 @@
 ;; Allocates a 64-byte filestat buffer, calls fd_filestat_get, and reads the
 ;; size field (a u64) at byte offset 32.
 (defn file-size (fd :i32) :i64
-  (let stat :ptr (alloc 64)
+  (let stat :ptr (static-ptr __filestat)
     (drop (fd_filestat_get fd stat))
     (i64.load (+ stat 32))))
 
@@ -361,7 +377,7 @@
 ;; Read up to len bytes from fd at absolute byte offset into buf.
 ;; Returns the number of bytes actually read.
 (defn pread (fd :i32 buf :ptr len :i32 offset :i64) :i32
-  (let iov   :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov   :*Iovec (static-ptr __iov)
     (let nread :ptr (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/base! iov buf)
       (Iovec/len!  iov len)
@@ -372,7 +388,7 @@
 ;; Write len bytes from buf to fd at absolute byte offset.
 ;; Returns the number of bytes actually written.
 (defn pwrite (fd :i32 buf :ptr len :i32 offset :i64) :i32
-  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov      :*Iovec (static-ptr __iov)
     (let nwritten :ptr (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/base! iov buf)
       (Iovec/len!  iov len)
@@ -382,7 +398,7 @@
 ;; (remove-file path) → :i32  (0 = ok, non-zero = WASI errno)
 ;; Delete path, splitting off the preopen prefix automatically.
 (defn remove-file (path :str) :i32
-  (let scratch :ptr (alloc 256)
+  (let scratch :ptr (static-ptr __scratch-256)
     (let r :*ResolvedPath (resolve-path path scratch 256)
       (if (= (ResolvedPath/fd r) -1)
         8
@@ -393,7 +409,7 @@
 ;; (make-dir path) → :i32  (0 = ok, non-zero = WASI errno)
 ;; Create directory at path, splitting off the preopen prefix automatically.
 (defn make-dir (path :str) :i32
-  (let scratch :ptr (alloc 256)
+  (let scratch :ptr (static-ptr __scratch-256)
     (let r :*ResolvedPath (resolve-path path scratch 256)
       (if (= (ResolvedPath/fd r) -1)
         8
@@ -404,7 +420,7 @@
 ;; (remove-dir path) → :i32  (0 = ok, non-zero = WASI errno)
 ;; Remove empty directory at path, splitting off the preopen prefix automatically.
 (defn remove-dir (path :str) :i32
-  (let scratch :ptr (alloc 256)
+  (let scratch :ptr (static-ptr __scratch-256)
     (let r :*ResolvedPath (resolve-path path scratch 256)
       (if (= (ResolvedPath/fd r) -1)
         8
@@ -415,10 +431,10 @@
 ;; (rename-file src dst) → :i32  (0 = ok, non-zero = WASI errno)
 ;; Rename src to dst, resolving each path's preopen independently.
 (defn rename-file (src :str dst :str) :i32
-  (let scratch :ptr (alloc 512)
+  (let scratch :ptr (static-ptr __scratch-512)
     (let rs :*ResolvedPath (resolve-path src scratch 256)
       (let rd :*ResolvedPath (resolve-path dst (+ scratch 256) 256)
-        (if (or (= (ResolvedPath/fd rs) -1) (= (ResolvedPath/fd rd) -1))
+        (if (| (= (ResolvedPath/fd rs) -1) (= (ResolvedPath/fd rd) -1))
           8
           (path_rename (ResolvedPath/fd rs)
                        (ResolvedPath/rptr rs) (ResolvedPath/rlen rs)
@@ -471,7 +487,7 @@
 ;; Accept the next incoming connection on listening fd.
 ;; Returns the new connection fd on success, or a negative WASI errno on failure.
 (defn sock-accept (fd :i32) :i32
-  (let conn-out :ptr (alloc 4)
+  (let conn-out :ptr (static-ptr __fd-out)
     (let err :i32 (sock_accept fd 0 conn-out)
       (if (= err 0)
         (i32.load conn-out)
@@ -481,9 +497,9 @@
 ;; Receive up to len bytes from a connected socket fd into buf.
 ;; Returns the number of bytes received, or a negative WASI errno on failure.
 (defn sock-recv (fd :i32 buf :ptr len :i32) :i32
-  (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov      :*Iovec (static-ptr __iov)
     (let nread    :ptr (+ (as :i32 iov) (sizeof Iovec))
-      (let ro-flags :ptr (alloc 4)
+      (let ro-flags :ptr (static-ptr __ro-flags)
         (Iovec/base! iov buf)
         (Iovec/len!  iov len)
         (let err :i32 (sock_recv fd (as :i32 iov) 1 0 nread ro-flags)
@@ -495,7 +511,7 @@
 ;; Send len bytes from buf over connected socket fd.
 ;; Returns the number of bytes sent, or a negative WASI errno on failure.
 (defn sock-send (fd :i32 buf :ptr len :i32) :i32
-  (let iov       :*Iovec (alloc (+ (sizeof Iovec) 4))
+  (let iov       :*Iovec (static-ptr __iov)
     (let nwritten  :ptr (+ (as :i32 iov) (sizeof Iovec))
       (Iovec/base! iov buf)
       (Iovec/len!  iov len)
@@ -537,9 +553,9 @@
 ;; Internally allocates two subscriptions (fd_read + clock) and one event slot.
 (defn poll-fd-read (fd :i32 timeout-ns :i64) :i32
   ;; 2 subscriptions × 48 bytes = 96; 2 events × 32 bytes = 64
-  (let subs  :ptr (alloc 96)
-    (let evts  :ptr (alloc 64)
-      (let nevt  :ptr (alloc 4)
+  (let subs  :ptr (static-ptr __poll2-subs)
+    (let evts  :ptr (static-ptr __poll2-evts)
+      (let nevt  :ptr (static-ptr __poll2-nevt)
         ;; subscription 0: fd_read
         (i64.store subs 0i64)                          ;; userdata = 0
         (i32.store8 (+ subs 8) 1)                      ;; tag = fd_read
@@ -575,9 +591,9 @@
 ;; Returns 1 if fd is writable, 0 if timed out, or -errno on error.
 ;; Pass timeout-ns = -1i64 to wait forever.
 (defn poll-fd-write (fd :i32 timeout-ns :i64) :i32
-  (let subs  :ptr (alloc 96)
-    (let evts  :ptr (alloc 64)
-      (let nevt  :ptr (alloc 4)
+  (let subs  :ptr (static-ptr __poll2-subs)
+    (let evts  :ptr (static-ptr __poll2-evts)
+      (let nevt  :ptr (static-ptr __poll2-nevt)
         (i64.store subs 0i64)
         (i32.store8 (+ subs 8) 2)                      ;; tag = fd_write
         (i32.store  (+ subs 16) fd)
@@ -605,11 +621,20 @@
                       (set! i (+ i 1)))
                     res))))))))))
 
+;; Static scratch buffers for poll-sleep-ns — allocated once in the static data
+;; section to avoid growing the heap on every sleep call.
+;;
+;; TODO: for multi-threaded use these would need per-thread buffers; a single
+;;       static set is safe for single-threaded programs.
+(defstatic __poll-subs :bytes 48)
+(defstatic __poll-evts :bytes 32)
+(defstatic __poll-nevt :i32)
+
 ;; (poll-sleep-ns ns) — sleep for ns nanoseconds using a clock subscription.
 (defn poll-sleep-ns (ns :i64) :void
-  (let subs :ptr (alloc 48)
-    (let evts :ptr (alloc 32)
-      (let nevt :ptr (alloc 4)
+  (let subs :ptr (static-ptr __poll-subs)
+    (let evts :ptr (static-ptr __poll-evts)
+      (let nevt :ptr (static-ptr __poll-nevt)
         (i64.store subs 0i64)
         (i32.store8 (+ subs 8) 0)         ;; tag = clock
         (i32.store  (+ subs 16) 1)        ;; clock_id = MONOTONIC

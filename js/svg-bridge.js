@@ -1,6 +1,5 @@
 /**
- * svg-bridge.js — intercepts WASI fd_write to SVG_FD and upserts SVG elements
- * into a live DOM <svg> element.
+ * svg-bridge.js — virtual /dev/svg device for WASI WebAssembly modules.
  *
  * Usage:
  *   import { mountSvg } from './svg-bridge.js';
@@ -9,9 +8,11 @@
  *   mountSvg(wasmImports, '#canvas', 800, 600, '0 0 800 600');
  *   // Then instantiate your WASM module with wasmImports.
  *
- * The bridge patches wasmImports.wasi_snapshot_preview1.fd_write so that
- * writes to fd SVG_FD (default 4) are intercepted and processed as SVG
- * protocol messages.  All other fds are forwarded to the original fd_write.
+ * The bridge patches the WASI imports to expose a virtual '/dev' preopened
+ * directory (fd 3).  When the WASM program opens '/dev/svg' via path_open the
+ * bridge assigns a fresh fd and intercepts all fd_write calls on it, parsing
+ * each newline-terminated write as an SVG protocol message and applying it to
+ * the live DOM <svg>.  All other fds are forwarded to the original handlers.
  *
  * Protocol (each message is newline-terminated):
  *   <tag id="ID" attr="val".../>     — upsert element (self-closing)
@@ -25,8 +26,11 @@
  *   <!attr ID NAME VALUE>            — setAttribute(NAME, VALUE) on element ID
  */
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const SVG_FD = 4;
+import { makeSvgProcessor } from './svg-processor.js';
+
+const SVG_NS  = 'http://www.w3.org/2000/svg';
+const DEV_FD   = 3;        // preopened fd advertised as the virtual '/dev' directory
+const DEV_NAME = '/dev';   // name returned by fd_prestat_dir_name for DEV_FD
 
 /**
  * mountSvg(wasmImports, selector, width, height, viewBox)
@@ -61,138 +65,16 @@ export function mountSvg(wasmImports, selector, width, height, viewBox) {
     svg.insertBefore(defs, svg.firstChild);
   }
 
-  // Insertion context: new elements are appended here.
-  let insertionParent = svg;
-
   // Accumulate bytes from fd_write calls (may arrive in fragments).
   let pending = '';
 
-  // ── Message processor ──────────────────────────────────────────────────────
-
-  function processMessage(line) {
-    line = line.trim();
-    if (!line) return;
-
-    // Directive messages: <!...>
-    if (line.startsWith('<!')) {
-      const inner = line.slice(2, -1).trim(); // strip <! and >
-      if (inner === 'clear') {
-        // Remove all non-defs children
-        for (const child of [...svg.childNodes]) {
-          if (child !== defs) svg.removeChild(child);
-        }
-        insertionParent = svg;
-        return;
-      }
-      if (inner === 'parent-root') {
-        insertionParent = svg;
-        return;
-      }
-      if (inner.startsWith('remove ')) {
-        const id = inner.slice(7).trim();
-        const el = document.getElementById(id);
-        if (el) el.parentNode.removeChild(el);
-        return;
-      }
-      if (inner.startsWith('parent ')) {
-        const id = inner.slice(7).trim();
-        const el = document.getElementById(id) || svg;
-        insertionParent = el;
-        return;
-      }
-      if (inner.startsWith('style ')) {
-        const rest = inner.slice(6);
-        const sp = rest.indexOf(' ');
-        if (sp !== -1) {
-          const id = rest.slice(0, sp);
-          const css = rest.slice(sp + 1);
-          const el = document.getElementById(id);
-          if (el) el.setAttribute('style', css);
-        }
-        return;
-      }
-      if (inner.startsWith('transform ')) {
-        const rest = inner.slice(10);
-        const sp = rest.indexOf(' ');
-        if (sp !== -1) {
-          const id = rest.slice(0, sp);
-          const t = rest.slice(sp + 1);
-          const el = document.getElementById(id);
-          if (el) el.setAttribute('transform', t);
-        }
-        return;
-      }
-      if (inner.startsWith('attr ')) {
-        // <!attr ID NAME VALUE>
-        const rest = inner.slice(5);
-        const sp1 = rest.indexOf(' ');
-        if (sp1 !== -1) {
-          const id = rest.slice(0, sp1);
-          const rest2 = rest.slice(sp1 + 1);
-          const sp2 = rest2.indexOf(' ');
-          if (sp2 !== -1) {
-            const name = rest2.slice(0, sp2);
-            const value = rest2.slice(sp2 + 1);
-            const el = document.getElementById(id);
-            if (el) el.setAttribute(name, value);
-          }
-        }
-        return;
-      }
-      // Unknown directive — ignore
-      return;
-    }
-
-    // SVG element message: parse the tag name and attributes
-    // Accept both self-closing (<tag .../>) and element-with-text (<tag...>TEXT</tag>)
-    let tagName, attrsStr, textContent = null;
-
-    // Check for element-with-text: <tag ...>TEXT</tag>
-    const fullMatch = line.match(/^<([a-zA-Z][a-zA-Z0-9]*)\s+([^>]*)>([^<]*)<\/[a-zA-Z][a-zA-Z0-9]*>$/);
-    if (fullMatch) {
-      tagName = fullMatch[1];
-      attrsStr = fullMatch[2];
-      textContent = fullMatch[3];
-    } else {
-      // Self-closing: <tag .../>
-      const selfMatch = line.match(/^<([a-zA-Z][a-zA-Z0-9]*)\s*(.*?)\s*\/>$/);
-      if (!selfMatch) return; // unrecognized format
-      tagName = selfMatch[1];
-      attrsStr = selfMatch[2];
-    }
-
-    // Parse attributes: name="value" pairs
-    const attrRe = /([a-zA-Z][a-zA-Z0-9_:-]*)="([^"]*)"/g;
-    const attrs = {};
-    let m;
-    while ((m = attrRe.exec(attrsStr)) !== null) {
-      attrs[m[1]] = m[2];
-    }
-
-    const id = attrs['id'];
-    if (!id) return; // id is required by protocol
-
-    // Upsert: update existing element or create a new one
-    let el = document.getElementById(id);
-    if (!el) {
-      el = document.createElementNS(SVG_NS, tagName);
-      insertionParent.appendChild(el);
-    }
-
-    // Apply all attributes
-    for (const [name, value] of Object.entries(attrs)) {
-      el.setAttribute(name, value);
-    }
-
-    // Set text content if present
-    if (textContent !== null) {
-      el.textContent = textContent;
-    }
-  }
+  const processMessage = makeSvgProcessor(svg, defs);
 
   // ── fd_write interceptor ───────────────────────────────────────────────────
 
-  let memory = null; // set when WASM memory is available
+  let memory = null;        // set when WASM memory is available
+  let svgFdAssigned = null;  // fd returned when path_open('/dev/svg') is called
+  let nextFd = 5;            // allocate fresh fds starting here
 
   /**
    * Provide a memory accessor. Call this after instantiation:
@@ -203,10 +85,70 @@ export function mountSvg(wasmImports, selector, width, height, viewBox) {
     memory = mem;
   }
 
+  // ── Virtual /dev preopen ───────────────────────────────────────────────────
+  // Advertise a preopened directory fd DEV_FD whose name is '/dev'.
+  // When path_open(DEV_FD, ..., 'svg', ...) is called the bridge allocates a
+  // fresh fd, records it as svgFdAssigned, and intercepts fd_write on it.
+
+  const origFdPrestatGet     = wasmImports.wasi_snapshot_preview1.fd_prestat_get;
+  const origFdPrestatDirName = wasmImports.wasi_snapshot_preview1.fd_prestat_dir_name;
+  const origPathOpen         = wasmImports.wasi_snapshot_preview1.path_open;
+
+  wasmImports.wasi_snapshot_preview1.fd_prestat_get = function (fd, buf) {
+    if (fd === DEV_FD && memory) {
+      // wasi_prestat_t: u8 pr_type (1=dir), 3 bytes pad, u32 pr_name_len
+      const dv = new DataView(memory.buffer);
+      dv.setUint8(buf,     1);                          // PREOPENTYPE_DIR
+      dv.setUint32(buf + 4, DEV_NAME.length, true);    // pr_name_len
+      return 0; // ESUCCESS
+    }
+    return origFdPrestatGet ? origFdPrestatGet(fd, buf) : 8; // EBADF
+  };
+
+  wasmImports.wasi_snapshot_preview1.fd_prestat_dir_name = function (fd, pathPtr, pathLen) {
+    if (fd === DEV_FD && memory) {
+      const mem = new Uint8Array(memory.buffer);
+      for (let i = 0; i < DEV_NAME.length && i < pathLen; i++) {
+        mem[pathPtr + i] = DEV_NAME.charCodeAt(i);
+      }
+      return 0; // ESUCCESS
+    }
+    return origFdPrestatDirName ? origFdPrestatDirName(fd, pathPtr, pathLen) : 8; // EBADF
+  };
+
+  wasmImports.wasi_snapshot_preview1.path_open = function (
+    dirfd, dirflags, pathPtr, pathLen, oflags,
+    rightsBaseLo, rightsBaseHi, rightsInhLo, rightsInhHi,
+    fdflags, fdOut
+  ) {
+    // WASI i64 rights values arrive as BigInt; positional args after i64 shift by 1
+    // because each i64 occupies one JS argument slot as a BigInt.
+    // Detect the actual fdOut slot by inspecting argument count.
+    if (dirfd === DEV_FD && memory) {
+      const actualPathPtr  = arguments[2];
+      const actualPathLen  = arguments[3];
+      // i64 fs_rights_base and fs_rights_inheriting each occupy one slot
+      // arguments: [0]=dirfd [1]=dirflags [2]=pathPtr [3]=pathLen [4]=oflags
+      //            [5]=rights_base(i64) [6]=rights_inh(i64) [7]=fdflags [8]=fd_out
+      const actualFdOutPtr = arguments[8];
+      const bytes = new Uint8Array(memory.buffer, actualPathPtr, actualPathLen);
+      const pathCopy = new Uint8Array(actualPathLen);
+      pathCopy.set(bytes);
+      const path  = new TextDecoder().decode(pathCopy);
+      if (path === 'svg') {
+        const fd = nextFd++;
+        svgFdAssigned = fd;
+        new DataView(memory.buffer).setUint32(actualFdOutPtr, fd, true);
+        return 0; // ESUCCESS
+      }
+    }
+    return origPathOpen ? origPathOpen(...arguments) : 58; // ENOTSUP
+  };
+
   const originalFdWrite = wasmImports.wasi_snapshot_preview1.fd_write;
 
   wasmImports.wasi_snapshot_preview1.fd_write = function (fd, iovs, iovsLen, nwrittenPtr) {
-    if (fd !== SVG_FD || !memory) {
+    if (fd !== svgFdAssigned || !memory) {
       return originalFdWrite(fd, iovs, iovsLen, nwrittenPtr);
     }
 
@@ -217,7 +159,9 @@ export function mountSvg(wasmImports, selector, width, height, viewBox) {
       const iovBase = mem.getUint32(iovs + i * 8,     true);
       const iovLen  = mem.getUint32(iovs + i * 8 + 4, true);
       const bytes   = new Uint8Array(memory.buffer, iovBase, iovLen);
-      const chunk   = new TextDecoder().decode(bytes);
+      const bytesCopy = new Uint8Array(iovLen);
+      bytesCopy.set(bytes);
+      const chunk   = new TextDecoder().decode(bytesCopy);
       pending += chunk;
       totalWritten += iovLen;
     }

@@ -309,9 +309,9 @@ function generateMap(env: Env): string {
   // Insertion sort by address
   for (let i = 1; i < sorted.length; i++) {
     const key = sorted[i];
-    const ptr = env.statics.get(key)!.ptr;
+    const ptr = env.statics.get(key).ptr;
     let j = i - 1;
-    while (j >= 0 && env.statics.get(sorted[j])!.ptr > ptr) {
+    while (j >= 0 && env.statics.get(sorted[j]).ptr > ptr) {
       sorted[j + 1] = sorted[j];
       j--;
     }
@@ -320,7 +320,7 @@ function generateMap(env: Env): string {
   let out = "";
   for (let i = 0; i < sorted.length; i++) {
     const key  = sorted[i];
-    const info = env.statics.get(key)!;
+    const info = env.statics.get(key);
     out += hexAddr(info.ptr) + "  " + sizeOfStatic(info).toString()
          + "  " + info.typeName + "  " + key + "\n";
   }

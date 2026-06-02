@@ -1,0 +1,36 @@
+;; @test bitwise-shift
+;; @feature shl/<<, shr/>>, band/&, bor/|, bxor/^, bnot operators
+;; @expect
+;;   shl 1 4 = 16
+;;   shr 32 2 = 8
+;;   band 0xFF 0x0F = 15
+;;   bor  0xF0 0x0F = 255
+;;   bxor 0xFF 0x0F = 240
+;;   bnot 0 = -1
+;;   bnot 1 = -2
+;;   << 1 4 = 16
+;;   >> 32 2 = 8
+;;   & 255 15 = 15
+;;   | 240 15 = 255
+;;   ^ 255 15 = 240
+;;   shl 3i64 5 = 96
+;;   shr 96i64 5 = 3
+
+
+(include io)
+
+(defn main ()
+  (printf "shl 1 4 = %d\n"  (shl 1 4))
+  (printf "shr 32 2 = %d\n" (shr 32 2))
+  (printf "band 0xFF 0x0F = %d\n" (band 255 15))
+  (printf "bor  0xF0 0x0F = %d\n" (bor  240 15))
+  (printf "bxor 0xFF 0x0F = %d\n" (bxor 255 15))
+  (printf "bnot 0 = %d\n"  (bnot 0))
+  (printf "bnot 1 = %d\n"  (bnot 1))
+  (printf "<< 1 4 = %d\n"    (<< 1 4))
+  (printf ">> 32 2 = %d\n"   (>> 32 2))
+  (printf "& 255 15 = %d\n"  (& 255 15))
+  (printf "| 240 15 = %d\n"  (| 240 15))
+  (printf "^ 255 15 = %d\n"  (^ 255 15))
+  (printf "shl 3i64 5 = %d\n"  (as :i32 (shl 3i64 5i64)))
+  (printf "shr 96i64 5 = %d\n" (as :i32 (shr 96i64 5i64))))

@@ -36,6 +36,21 @@
         "path": "./syntaxes/woua.tmLanguage.json"
       }
     ],
+    "semanticTokenScopes": [
+      {
+        "scopes": {
+          "function":           ["entity.name.function"],
+          "function.declaration": ["entity.name.function"],
+          "macro":              ["entity.name.function.macro"],
+          "macro.declaration":  ["entity.name.function.macro"],
+          "type":               ["entity.name.type"],
+          "type.declaration":   ["entity.name.class"],
+          "variable.readonly":  ["variable.other.constant"],
+          "operator":           ["keyword.operator"],
+          "operator.declaration": ["entity.name.function"]
+        }
+      }
+    ],
     "configuration": {
       "title": "woua",
       "properties": {

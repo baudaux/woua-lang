@@ -142,11 +142,11 @@
 (defn math-pow (x :f64 y :f64) :f64
   (if (= y 0.0f64) 1.0f64
   (if (= x 0.0f64) 0.0f64
-  (if (and (< x 0.0f64) (!= (floor y) y))
+  (if (& (< x 0.0f64) (!= (floor y) y))
     (/ 0.0f64 0.0f64)   ;; nan: negative base with fractional exponent
     (let ax :f64 (abs x)
     (let result :f64 (math-exp (* y (math-log ax)))
-    (if (and (< x 0.0f64) (!= (* 2.0f64 (floor (* y 0.5f64))) y))
+    (if (& (< x 0.0f64) (!= (* 2.0f64 (floor (* y 0.5f64))) y))
       (neg result)   ;; odd integer exponent → negative
       result)))))))
 

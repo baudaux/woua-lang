@@ -1,9 +1,12 @@
-;; SVG rendering library — write SVG elements to a virtual /dev/svg fd.
+;; SVG rendering library — write SVG elements to the /dev/svg virtual device.
 ;;
-;; The JS bridge (js/svg-bridge.js) intercepts fd_write to fd SVG-FD (default 4)
-;; and upserts elements into a live DOM <svg> by element id.
+;; The JS bridge (js/svg-bridge.js) advertises a virtual '/dev' preopened
+;; directory (fd 3).  Programs open '/dev/svg' via (open-file "/dev/svg" 0),
+;; receive a dynamically allocated fd, and write protocol messages to it with
+;; (svg-flush-to buf fd).  The bridge intercepts those fd_write calls and
+;; upserts elements into a live DOM <svg> by element id.
 ;;
-;; Protocol (newline-terminated messages written to SVG-FD):
+;; Protocol (newline-terminated messages written to the svg fd):
 ;;   <tag id="ID" attr="val" .../>\n   — upsert element with that id
 ;;   <tag id="ID" ...>TEXT</tag>\n     — upsert element with text content
 ;;   <!remove ID>\n                     — remove element with id ID
@@ -14,19 +17,24 @@
 ;;   <!transform ID T>\n                — set transform attribute on element ID
 ;;   <!attr ID NAME VALUE>\n            — set arbitrary attribute on element ID
 ;;
+;; The special id "__root" in <!style>, <!transform> and <!attr> refers to the
+;; root <svg> element.  Use (svg-root-attr) / (svg-root-style) to target it.
+;;
 ;; Usage:
 ;;   (include svg)
-;;   (let buf :*SvgBuf (svg-buf-new 4096))
-;;   (svg-circle buf "c1" 50 50 20 "#FF0000")
-;;   (svg-flush buf)
+;;   (let svg-fd :i32 (open-file "/dev/svg" 0)
+;;     (let buf :*SvgBuf (svg-buf-new 4096)
+;;       (svg-circle buf "c1" 50 50 20 "#FF0000")
+;;       (svg-flush-to buf svg-fd)))
+
+;; Declare linear memory as shared — the SVG bridge runs WASM in a Web Worker
+;; and reads the memory from the main thread, so a SharedArrayBuffer is required.
+(shared-memory)
 
 (include io)
 
-;; Default file descriptor for SVG output (intercepted by the JS bridge).
-(defconst SVG-FD 4)
-
 ;; ── SvgBuf ───────────────────────────────────────────────────────────────────
-;; A growable byte buffer for building SVG protocol messages.
+;; A dynamically-growing byte buffer for building SVG protocol messages.
 ;; Fields:
 ;;   ptr  — pointer to the backing allocation
 ;;   len  — number of bytes currently written
@@ -48,15 +56,37 @@
 (defmacro svg-buf-reset (buf)
   (SvgBuf/len! buf 0))
 
+;; Internal: grow buf so it can hold at least (len + needed) bytes.
+;; Doubles the capacity until it is large enough, allocates a new block,
+;; copies the existing content, and updates ptr/cap.
+(defn __svg-ensure (buf :*SvgBuf needed :i32)
+  (let old-cap :i32 (SvgBuf/cap buf)
+    (let required :i32 (+ (SvgBuf/len buf) needed)
+      (if (> required old-cap)
+        (let new-cap :i32 (* old-cap 2)
+          (if (< new-cap required)
+            (set! new-cap required))
+          (let old-ptr :ptr (SvgBuf/ptr buf)
+            (let new-ptr :ptr (alloc new-cap)
+              (let i :i32 0
+                (while (< i (SvgBuf/len buf))
+                  (i32.store8 (+ new-ptr i) (i32.load8_u (+ old-ptr i)))
+                  (set! i (+ i 1))))
+              (SvgBuf/ptr! buf new-ptr)
+              (SvgBuf/cap! buf new-cap))))))))
+
 ;; Internal: append a single byte to buf.
 (defmacro __svg-byte (buf b)
-  (let __p :ptr (SvgBuf/ptr buf)
-    (let __l :i32 (SvgBuf/len buf)
-      (i32.store8 (+ __p __l) b)
-      (SvgBuf/len! buf (+ __l 1)))))
+  (progn
+    (__svg-ensure buf 1)
+    (let __p :ptr (SvgBuf/ptr buf)
+      (let __l :i32 (SvgBuf/len buf)
+        (i32.store8 (+ __p __l) b)
+        (SvgBuf/len! buf (+ __l 1))))))
 
 ;; Internal: append all bytes of str s to buf (defn, not macro).
 (defn __svg-str (buf :*SvgBuf s :str)
+  (__svg-ensure buf (str/len s))
   (let p  :ptr (str/ptr s)
     (let n  :i32 (str/len s)
       (let bp :ptr (SvgBuf/ptr buf)
@@ -66,7 +96,6 @@
               (i32.store8 (+ bp (+ l i)) (i32.load8_u (+ p i)))
               (set! i (+ i 1))))
           (SvgBuf/len! buf (+ l n)))))))
-
 ;; Internal: append decimal digits of i32 n to buf.
 (defmacro __svg-int (buf n)
   (__svg-str buf (i32->str n)))
@@ -75,14 +104,9 @@
 (defmacro __svg-f32 (buf n)
   (__svg-str buf (f32->str n)))
 
-;; (svg-flush buf) — write buffer contents to SVG-FD and reset.
-(defmacro svg-flush (buf)
-  (progn
-    (write SVG-FD (SvgBuf/ptr buf) (SvgBuf/len buf))
-    (svg-buf-reset buf)))
-
-;; (svg-flush-to buf fd) — like svg-flush but to an explicit fd.
-;; Useful for testing: (svg-flush-to buf STDOUT) and redirect > file.svg
+;; (svg-flush-to buf fd) — write buffer contents to fd and reset.
+;; Use the fd returned by (open-file "/dev/svg" 0) for the SVG bridge,
+;; or STDOUT for CLI testing: (svg-flush-to buf STDOUT) > out.svg
 (defmacro svg-flush-to (buf fd)
   (progn
     (write fd (SvgBuf/ptr buf) (SvgBuf/len buf))
@@ -328,6 +352,22 @@
   (progn
     (__svg-str buf "<!clear>")
     (__svg-byte buf 10)))
+
+;; ── Root <svg> element ───────────────────────────────────────────────────────
+;; The special sentinel id "__root" refers to the root <svg> DOM element.
+;; Use these macros to set attributes (width, height, viewBox, style, etc)
+;; on the root <svg> from WASM code.
+
+;; (svg-root-attr buf name value) — set an arbitrary attribute on the root <svg>.
+;; Example: (svg-root-attr buf "width" "800")
+;;          (svg-root-attr buf "viewBox" "0 0 800 600")
+(defmacro svg-root-attr (buf name value)
+  (svg-attr buf "__root" name value))
+
+;; (svg-root-style buf css) — set the style attribute on the root <svg>.
+;; Example: (svg-root-style buf "background:#222;")
+(defmacro svg-root-style (buf css)
+  (svg-style buf "__root" css))
 
 ;; ── Attribute commands ────────────────────────────────────────────────────────
 

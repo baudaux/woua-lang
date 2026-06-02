@@ -13,13 +13,21 @@
 
 import { makeWasi } from '../js/wasi-min.js';
 
-const SVG_FD = 4;
-
+let svgFd  = -1;
+let nextFd = 5; // 0-2 = stdio, 3 = /dev preopen, 4 reserved
 let pending = '';
 
 const wasi = makeWasi({
+  preopens: ['/dev'],
+  onPathOpen(_dirfd, path) {
+    if (path === 'svg') {
+      svgFd = nextFd++;
+      return svgFd;
+    }
+    return -1;
+  },
   onFdWrite(fd, text) {
-    if (fd !== SVG_FD) return false;
+    if (fd !== svgFd) return false;
     // Buffer and split on newlines; post each complete line.
     pending += text;
     let nl;
@@ -40,6 +48,12 @@ self.onmessage = async ({ data }) => {
       wasi_snapshot_preview1: wasi.wasiImport,
     });
     wasi.setMemory(instance.exports.memory);
+    // Share the (SharedArrayBuffer-backed) memory with the main thread so it
+    // can read WASM linear memory directly.  Only possible when cross-origin
+    // isolation is active (COOP + COEP headers); falls back silently otherwise.
+    if (instance.exports.memory?.buffer instanceof SharedArrayBuffer) {
+      self.postMessage({ type: 'memory', memory: instance.exports.memory });
+    }
     instance.exports._start();
     self.postMessage({ type: 'exit', code: 0 });
   } catch (e) {

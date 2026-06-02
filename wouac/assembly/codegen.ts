@@ -50,7 +50,7 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
     const fname = (list.children[1] as SymbolNode).name;
     const tupleTypes = extractTupleAnnotation(list, 3);
     if (tupleTypes != null) {
-      env.funcTupleResults.set(fname, tupleTypes!);
+      env.funcTupleResults.set(fname, tupleTypes);
       env.funcResultTypes.set(fname, ""); // multi-return: no single result type
     } else {
       // :str return annotation is treated as a two-value tuple (:i32 :i32).
@@ -215,7 +215,7 @@ function registerFuncTypeIfNeeded(params: Array<string>, results: Array<string>,
 
 // Add a named function to the first-class function table; return its table index.
 function registerFuncRef(name: string, env: Env): i32 {
-  if (env.funcTableIndex.has(name)) return env.funcTableIndex.get(name)!;
+  if (env.funcTableIndex.has(name)) return env.funcTableIndex.get(name);
   const idx = env.funcTableEntries.length;
   env.funcTableEntries.push(name);
   env.funcTableIndex.set(name, idx);
@@ -230,7 +230,7 @@ function assembleModule(env: Env): string {
   // Function type declarations for call_indirect (first-class functions)
   for (let i = 0; i < env.funcTypeKeys.length; i++) {
     const key = env.funcTypeKeys[i];
-    const ft  = env.funcTypesByKey.get(key)!;
+    const ft  = env.funcTypesByKey.get(key);
     let typeDecl = "  (type $" + key + " (func";
     if (ft.params.length > 0) {
       typeDecl += " (param";
@@ -266,8 +266,12 @@ function assembleModule(env: Env): string {
   }
   if (env.imports.length > 0) out += "\n";
 
-  // Linear memory
-  out += "  (memory 1)\n";
+  // Linear memory — shared when svg is used (worker↔main-thread access)
+  if (env.usesSvg) {
+    out += "  (memory 1 65536 shared)\n";
+  } else {
+    out += "  (memory 1)\n";
+  }
   out += '  (export "memory" (memory 0))\n\n';
 
   // Function table for first-class functions (fn-ref / call_indirect)
@@ -286,30 +290,24 @@ function assembleModule(env: Env): string {
   }
   if (env.dataEntries.length > 0) out += "\n";
 
+  // Patch heap-ptr's WAT initializer to the first byte past static data (8-byte aligned).
+  // lib/memory.woua (included via core.woua) declares (defvar heap-ptr :ptr) with a
+  // placeholder zero; the correct address is only known here after static layout is done.
+  const alignedHeap = (env.memoryOffset + 7) & ~7;
+  if (env.globals.has("heap-ptr")) {
+    env.globals.get("heap-ptr").initWat = "(i32.const " + alignedHeap.toString() + ")";
+  }
+
   // User-defined mutable globals from (defvar ...)
   // Value-type struct markers (isValueType=true) are skipped — only their leaf sub-globals are emitted.
   for (let i = 0; i < env.globalNames.length; i++) {
     const gname = env.globalNames[i];
-    const ginfo = env.globals.get(gname)!;
+    const ginfo = env.globals.get(gname);
     if (ginfo.isValueType) continue; // marker only
     out += "  (global $" + gname + " (mut " + watType(ginfo.typeName) + ") " + ginfo.initWat + ")\n";
   }
   if (env.globalNames.length > 0) out += "\n";
 
-  // Bump allocator: alloc(size i32) → ptr i32
-  // $heap_ptr global is initialised to the end of static data (memoryOffset,
-  // aligned to 8 bytes) so that allocations never overlap the data section.
-  // 8-byte alignment is the minimum required for i64 stores (e.g. clock_time_get).
-  const alignedHeap = (env.memoryOffset + 7) & ~7;
-  out += "  (global $heap_ptr (mut i32) (i32.const " + alignedHeap.toString() + "))\n\n";
-  out += "  (func $alloc (param $size i32) (result i32)\n";
-  out += "    (local $ptr i32)\n";
-  out += "    (local $aligned i32)\n";
-  out += "    (local.set $ptr (global.get $heap_ptr))\n";
-  out += "    (local.set $aligned (i32.and (i32.add (local.get $size) (i32.const 7)) (i32.const -8)))\n";
-  out += "    (global.set $heap_ptr (i32.add (local.get $ptr) (local.get $aligned)))\n";
-  out += "    (local.get $ptr)\n";
-  out += "  )\n\n";
 
   // User-defined functions — dead code elimination.
   // Walk reachable set starting from "main", following (call $name) references.
@@ -325,7 +323,7 @@ function assembleModule(env: Env): string {
     if (reachable.has(fname)) continue;
     reachable.add(fname);
     if (!env.funcBodies.has(fname)) continue;
-    const body = env.funcBodies.get(fname)!;
+    const body = env.funcBodies.get(fname);
     // Scan for (call $foo) references in the WAT body
     let pos = 0;
     while (pos < body.length) {
@@ -349,7 +347,7 @@ function assembleModule(env: Env): string {
   for (let i = 0; i < env.funcNames.length; i++) {
     const fname = env.funcNames[i];
     if (reachable.has(fname)) {
-      out += env.funcBodies.get(fname)! + "\n";
+      out += env.funcBodies.get(fname) + "\n";
     }
   }
 
@@ -360,7 +358,7 @@ function assembleModule(env: Env): string {
   // Only emit the proc_exit call when proc_exit has been imported (not all
   // programs include wasi_p1 / io).
   const mainResultType = env.funcResultTypes.has("main")
-    ? env.funcResultTypes.get("main")! : "";
+    ? env.funcResultTypes.get("main") : "";
   let hasProcExit = false;
   for (let i = 0; i < env.imports.length; i++) {
     if (env.imports[i].localName == "proc_exit") { hasProcExit = true; break; }
@@ -410,7 +408,7 @@ function normalizeType(t: string): string {
 function copyLocals(locals: Map<string, string>): Map<string, string> {
   const copy = new Map<string, string>();
   const keys = locals.keys();
-  for (let i = 0; i < keys.length; i++) copy.set(keys[i], locals.get(keys[i])!);
+  for (let i = 0; i < keys.length; i++) copy.set(keys[i], locals.get(keys[i]));
   return copy;
 }
 
@@ -419,7 +417,7 @@ function copyLocals(locals: Map<string, string>): Map<string, string> {
 // user-defined overloads for `:*T` types beat built-in primitive overloads.
 function resolveOp(name: string, argTypes: Array<string>, env: Env): OpInfo | null {
   if (!env.ops.has(name)) return null;
-  const overloads = env.ops.get(name)!;
+  const overloads = env.ops.get(name);
   // Pass 1: exact type match (no normalization)
   for (let i = 0; i < overloads.length; i++) {
     const ov = overloads[i];
@@ -457,13 +455,15 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     if (sym.startsWith("__str:")) return ":str"; // interned string literal
     // Named defstatic — return its declared type
     if (env.statics.has(sym)) {
-      const st = env.statics.get(sym)!;
+      const st = env.statics.get(sym);
       if (st.typeName == ":*str" || st.typeName == ":strlit") return ":str";
       return st.typeName; // :*Point, :i32, :bytes, etc.
     }
-    // Mutable global variable
-    if (env.globals.has(sym)) return env.globals.get(sym)!.typeName;
-    return locals.has(sym) ? locals.get(sym)! : ":i32";
+    // Mutable global variable — checked after locals so that local params/lets
+    // with the same name take priority over globals (locals shadow globals).
+    if (locals.has(sym)) return locals.get(sym);
+    if (env.globals.has(sym)) return env.globals.get(sym).typeName;
+    return ":i32";
   }
   if (node.tag == TAG_LIST) {
     const list = node as ListNode;
@@ -482,7 +482,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
           const callList = list.children[2] as ListNode;
           if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
             const fnName = (callList.children[0] as SymbolNode).name;
-            if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+            if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName);
           }
         }
         const pnames = new Array<string>(); const ptypes = new Array<string>();
@@ -499,7 +499,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
           const tname = (list.children[1] as SymbolNode).name;
           const ext = copyLocals(locals);
           ext.set(tname, "tuple");
-          for (let k = 0; k < tlocTypes!.length; k++) ext.set(tname + "_" + k.toString(), tlocTypes![k]);
+          for (let k = 0; k < tlocTypes.length; k++) ext.set(tname + "_" + k.toString(), tlocTypes[k]);
           if (list.children.length <= 3) return "";
           return typeOf(list.children[list.children.length - 1], env, ext);
         }
@@ -511,7 +511,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
           const tname = (list.children[1] as SymbolNode).name;
           const ext = copyLocals(locals);
           ext.set(tname, "tuple");
-          for (let k = 0; k < iTypes!.length; k++) ext.set(tname + "_" + k.toString(), iTypes![k]);
+          for (let k = 0; k < iTypes.length; k++) ext.set(tname + "_" + k.toString(), iTypes[k]);
           if (list.children.length <= 3) return "";
           return typeOf(list.children[list.children.length - 1], env, ext);
         }
@@ -598,9 +598,9 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
       const typeName = op.substring(0, slash);
       const field = op.substring(slash + 1);
       // Tuple-local accessor: (pair/0) — prefix is a "tuple" marker in locals
-      if (locals.has(typeName) && locals.get(typeName)! == "tuple") {
+      if (locals.has(typeName) && locals.get(typeName) == "tuple") {
         const slotKey = typeName + "_" + field;
-        return locals.has(slotKey) ? locals.get(slotKey)! : ":i32";
+        return locals.has(slotKey) ? locals.get(slotKey) : ":i32";
       }
       // :str fat-pointer accessor: str/ptr → :ptr, str/len → :i32, setters → void
       if (typeName == "str") {
@@ -608,16 +608,16 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
         return field == "ptr" ? ":ptr" : ":i32";
       }
       if (env.types.has(typeName)) {
-        const typeInfo = env.types.get(typeName)!;
-        if (typeInfo.fields.has(field)) return typeInfo.fields.get(field)!.typeName;
+        const typeInfo = env.types.get(typeName);
+        if (typeInfo.fields.has(field)) return typeInfo.fields.get(field).typeName;
       }
       return ":i32";
     }
     // First-class function call via a function-typed local (call_indirect)
-    if (locals.has(op) && locals.get(op)!.startsWith(":func:")) {
-      const typeKey = locals.get(op)!.slice(6);
+    if (locals.has(op) && locals.get(op).startsWith(":func:")) {
+      const typeKey = locals.get(op).slice(6);
       if (env.funcTypesByKey.has(typeKey)) {
-        const ftRes = env.funcTypesByKey.get(typeKey)!.results;
+        const ftRes = env.funcTypesByKey.get(typeKey).results;
         return ftRes.length == 1 ? ftRes[0] : "";
       }
       return ":i32";
@@ -665,7 +665,7 @@ function funcResultType(name: string, env: Env): string {
   for (let i = 0; i < env.imports.length; i++) {
     if (env.imports[i].localName == name) return env.imports[i].result;
   }
-  if (env.funcResultTypes.has(name)) return env.funcResultTypes.get(name)!;
+  if (env.funcResultTypes.has(name)) return env.funcResultTypes.get(name);
   return ":i32"; // fallback
 }
 
@@ -714,7 +714,7 @@ function inferDefnResultType(list: ListNode, env: Env): string {
   }
   const locals = copyLocals(paramLocals);
   const letKeys = letLocals.keys();
-  for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k])!);
+  for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k]));
   return typeOf(list.children[list.children.length - 1], env, locals);
 }
 
@@ -738,7 +738,7 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
         const callList = list.children[2] as ListNode;
         if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
           const fnName = (callList.children[0] as SymbolNode).name;
-          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName);
         }
       }
       const pnames = new Array<string>(); const ptypes = new Array<string>();
@@ -756,9 +756,9 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
       const maybeTypes = extractTupleAnnotation(list, 2);
       if (maybeTypes != null) {
         const tname = (list.children[1] as SymbolNode).name;
-        for (let k = 0; k < maybeTypes!.length; k++) {
+        for (let k = 0; k < maybeTypes.length; k++) {
           const slot = tname + "_" + k.toString();
-          if (!letLocals.has(slot)) letLocals.set(slot, maybeTypes![k]);
+          if (!letLocals.has(slot)) letLocals.set(slot, maybeTypes[k]);
         }
         // tname itself is a marker — not a real WAT local; skip adding to letLocals
         for (let i = 3; i < list.children.length; i++) {
@@ -772,9 +772,9 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
       const iTypes = inferredTupleTypes(list.children[2], env);
       if (iTypes != null) {
         const tname = (list.children[1] as SymbolNode).name;
-        for (let k = 0; k < iTypes!.length; k++) {
+        for (let k = 0; k < iTypes.length; k++) {
           const slot = tname + "_" + k.toString();
-          if (!letLocals.has(slot)) letLocals.set(slot, iTypes![k]);
+          if (!letLocals.has(slot)) letLocals.set(slot, iTypes[k]);
         }
         for (let i = 3; i < list.children.length; i++) {
           collectLetLocals(list.children[i], env, paramLocals, letLocals);
@@ -811,7 +811,7 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
     }
     const allLocals = copyLocals(paramLocals);
     const keys = letLocals.keys();
-    for (let k = 0; k < keys.length; k++) allLocals.set(keys[k], letLocals.get(keys[k])!);
+    for (let k = 0; k < keys.length; k++) allLocals.set(keys[k], letLocals.get(keys[k]));
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, allLocals);
     if (!letLocals.has(letName)) {
       if (typeAnnot == ":str") {
@@ -888,11 +888,11 @@ function codegenDefn(list: ListNode, env: Env): string {
   // Full locals map used for type inference during codegen
   const locals = copyLocals(paramLocals);
   const letKeys = letLocals.keys();
-  for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k])!);
+  for (let k = 0; k < letKeys.length; k++) locals.set(letKeys[k], letLocals.get(letKeys[k]));
   // Pre-populate _ptr/_len sub-locals for :str params so the fat-pointer
   // accessor (str/ptr / str/len) can detect them in the body codegen.
   for (let i = 0; i < paramNames.length; i++) {
-    if (paramLocals.get(paramNames[i])! == ":str") {
+    if (paramLocals.get(paramNames[i]) == ":str") {
       locals.set(paramNames[i] + "_ptr", ":i32");
       locals.set(paramNames[i] + "_len", ":i32");
     }
@@ -903,7 +903,7 @@ function codegenDefn(list: ListNode, env: Env): string {
   let paramDecls = "";
   for (let i = 0; i < paramNames.length; i++) {
     const pname = paramNames[i];
-    const ptype = paramLocals.get(pname)!;
+    const ptype = paramLocals.get(pname);
     if (ptype == ":str") {
       paramDecls += " (param $" + pname + "_ptr i32) (param $" + pname + "_len i32)";
       // Make _ptr and _len available in paramLocals for downstream type inference.
@@ -927,7 +927,7 @@ function codegenDefn(list: ListNode, env: Env): string {
   if (tupleTypes != null) {
     // Explicit tuple return — emit (result t1 t2 ...)
     let rparts = "";
-    for (let k = 0; k < tupleTypes!.length; k++) rparts += " " + watType(tupleTypes![k]);
+    for (let k = 0; k < tupleTypes.length; k++) rparts += " " + watType(tupleTypes[k]);
     resultDecl = " (result" + rparts + ")";
   } else if (scalarAnnot != null) {
     if (scalarAnnot == ":str") {
@@ -962,7 +962,7 @@ function codegenDefn(list: ListNode, env: Env): string {
   // :str marker locals are skipped here — their _ptr/_len counterparts are real WAT locals.
   let localDecls = "";
   for (let k = 0; k < letKeys.length; k++) {
-    const lt = letLocals.get(letKeys[k])!;
+    const lt = letLocals.get(letKeys[k]);
     if (lt == ":str") continue; // skip marker; _ptr and _len are emitted separately
     if (isValueTypeAnnot(lt, env)) continue; // skip marker; field locals are emitted separately
     localDecls += "\n    " + watLocalDecl(letKeys[k], watType(lt));
@@ -988,9 +988,9 @@ function codegenDefn(list: ListNode, env: Env): string {
 function valueTypeLeafTypes(typeName: string, env: Env): Array<string> {
   const result = new Array<string>();
   if (!env.types.has(typeName)) return result;
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
-    const ft = typeInfo.fields.get(typeInfo.fieldNames[fi])!.typeName;
+    const ft = typeInfo.fields.get(typeInfo.fieldNames[fi]).typeName;
     if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
       const sub = valueTypeLeafTypes(ft.slice(1), env);
       for (let k = 0; k < sub.length; k++) result.push(sub[k]);
@@ -1007,10 +1007,10 @@ function valueTypeLeafTypes(typeName: string, env: Env): Array<string> {
 function valueTypeLeafLocals(prefix: string, typeName: string, env: Env): Array<string> {
   const result = new Array<string>();
   if (!env.types.has(typeName)) return result;
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
     const fname = typeInfo.fieldNames[fi];
-    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const ft    = typeInfo.fields.get(fname).typeName;
     const slot  = prefix + "_" + fname;
     if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
       const sub = valueTypeLeafLocals(slot, ft.slice(1), env);
@@ -1027,10 +1027,10 @@ function valueTypeLeafLocals(prefix: string, typeName: string, env: Env): Array<
 function collectValueTypeSubLocals(prefix: string, typeName: string, env: Env,
                                     locals: Map<string, string>): void {
   if (!env.types.has(typeName)) return;
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
     const fname = typeInfo.fieldNames[fi];
-    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const ft    = typeInfo.fields.get(fname).typeName;
     const slot  = prefix + "_" + fname;
     if (!locals.has(slot)) {
       locals.set(slot, ft); // marker or scalar
@@ -1045,11 +1045,11 @@ function collectValueTypeSubLocals(prefix: string, typeName: string, env: Env,
 // Recursively expands embedded struct fields to leaf scalars.
 function emitValueTypeParamDecls(prefix: string, typeName: string, env: Env): string {
   if (!env.types.has(typeName)) return "";
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   let out = "";
   for (let fi = 0; fi < typeInfo.fieldNames.length; fi++) {
     const fname = typeInfo.fieldNames[fi];
-    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const ft    = typeInfo.fields.get(fname).typeName;
     const slot  = prefix + "_" + fname;
     if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
       out += emitValueTypeParamDecls(slot, ft.slice(1), env);
@@ -1083,11 +1083,11 @@ function emitStructFieldStores(basePtr: string, absOffset: i32, argNode: Node,
     const argList = argNode as ListNode;
     if (argList.children.length > 0 && argList.children[0].tag == TAG_SYMBOL &&
         (argList.children[0] as SymbolNode).name == innerTypeName) {
-      const innerInfo = env.types.get(innerTypeName)!;
+      const innerInfo = env.types.get(innerTypeName);
       let out = "";
       for (let fi = 0; fi < innerInfo.fieldNames.length; fi++) {
         const fname = innerInfo.fieldNames[fi];
-        const innerField = innerInfo.fields.get(fname)!;
+        const innerField = innerInfo.fields.get(fname);
         out += emitStructFieldStores(basePtr, absOffset + innerField.offset,
                                      argList.children[fi + 1], innerField.typeName, env, locals);
       }
@@ -1107,7 +1107,7 @@ function inferredTupleTypes(node: Node, env: Env): Array<string> | null {
   if (lst.children.length == 0 || lst.children[0].tag != TAG_SYMBOL) return null;
   const fname = (lst.children[0] as SymbolNode).name;
   if (!env.funcTupleResults.has(fname)) return null;
-  return env.funcTupleResults.get(fname)!;
+  return env.funcTupleResults.get(fname);
 }
 
 // Parse a tuple destructuring pattern `(name [:type] name [:type] ...)` into
@@ -1203,12 +1203,12 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
     const sym = (node as SymbolNode).name;
     // Interned string literal __str:xxx → two compile-time constants (ptr, len)
     if (sym.startsWith("__str:") && env.statics.has(sym)) {
-      const info = env.statics.get(sym)!;
+      const info = env.statics.get(sym);
       return "(i32.const " + info.ptr.toString() + ") (i32.const " + info.len.toString() + ")";
     }
     // Named defstatic — emit its address or value
     if (env.statics.has(sym)) {
-      const info = env.statics.get(sym)!;
+      const info = env.statics.get(sym);
       if (info.typeName == ":*str") {
         // :*str statics have an 8-byte header; raw bytes start at hdrPtr+8
         return "(i32.const " + (info.ptr + 8).toString() + ") (i32.const " + info.len.toString() + ")";
@@ -1223,13 +1223,13 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
     // Mutable global variable
     if (env.globals.has(sym)) return "(global.get $" + sym + ")";
     // :str local → push two values (ptr, len)
-    if (locals.has(sym) && locals.get(sym)! == ":str") {
+    if (locals.has(sym) && locals.get(sym) == ":str") {
       return "(local.get $" + sym + "_ptr) (local.get $" + sym + "_len)";
     }
     // Value-type struct local → push all field values (used when passing as arg or returning)
-    if (locals.has(sym) && isValueTypeAnnot(locals.get(sym)!, env)) {
-      const vtN = valueTypeName(locals.get(sym)!);
-      const vtI = env.types.get(vtN)!;
+    if (locals.has(sym) && isValueTypeAnnot(locals.get(sym), env)) {
+      const vtN = valueTypeName(locals.get(sym));
+      const vtI = env.types.get(vtN);
       let out = "";
       for (let fi = 0; fi < vtI.fieldNames.length; fi++) {
         if (out.length > 0) out += " ";
@@ -1370,7 +1370,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         const callList = list.children[2] as ListNode;
         if (callList.children.length > 0 && callList.children[0].tag == TAG_SYMBOL) {
           const fnName = (callList.children[0] as SymbolNode).name;
-          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName)!;
+          if (env.funcTupleResults.has(fnName)) inferredTypes = env.funcTupleResults.get(fnName);
         }
       }
       const pnames = new Array<string>(); const ptypes = new Array<string>();
@@ -1402,9 +1402,9 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         const callWat = codegenExpr(list.children[3], env, locals);
         const newLocals = copyLocals(locals);
         newLocals.set(tname, "tuple");
-        for (let k = 0; k < tlocTypes!.length; k++) newLocals.set(tname + "_" + k.toString(), tlocTypes![k]);
+        for (let k = 0; k < tlocTypes.length; k++) newLocals.set(tname + "_" + k.toString(), tlocTypes[k]);
         let body = "(; let " + tname + " ;) " + callWat;
-        for (let k = tlocTypes!.length - 1; k >= 0; k--) {
+        for (let k = tlocTypes.length - 1; k >= 0; k--) {
           body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
         }
         for (let i = 4; i < list.children.length; i++) {
@@ -1421,9 +1421,9 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         const callWat = codegenExpr(list.children[2], env, locals);
         const newLocals = copyLocals(locals);
         newLocals.set(tname, "tuple");
-        for (let k = 0; k < iTypes!.length; k++) newLocals.set(tname + "_" + k.toString(), iTypes![k]);
+        for (let k = 0; k < iTypes.length; k++) newLocals.set(tname + "_" + k.toString(), iTypes[k]);
         let body = "(; let " + tname + " ;) " + callWat;
-        for (let k = iTypes!.length - 1; k >= 0; k--) {
+        for (let k = iTypes.length - 1; k >= 0; k--) {
           body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
         }
         for (let i = 3; i < list.children.length; i++) {
@@ -1475,7 +1475,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     // ── Value-type struct binding: (let p :Point (Point 3 4) ...) ─────────────
     if (isValueTypeAnnot(typeAnnot, env)) {
       const vtN = valueTypeName(typeAnnot);
-      const vtI = env.types.get(vtN)!;
+      const vtI = env.types.get(vtN);
       const fnames = vtI.fieldNames;
       const newLocals = copyLocals(locals);
       newLocals.set(letName, typeAnnot); // marker
@@ -1511,7 +1511,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     // ── Ref-type struct binding: (let p :*Point (Point 3 4) ...) ──────────────
     if (isRefTypeAnnot(typeAnnot, env)) {
       const vtN = refTypeName(typeAnnot);
-      const vtI = env.types.get(vtN)!;
+      const vtI = env.types.get(vtN);
       const fnames = vtI.fieldNames;
       const newLocals = copyLocals(locals);
       newLocals.set(letName, typeAnnot); // preserve :*T for operator dispatch
@@ -1525,7 +1525,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
           bodyR += "(call $alloc (i32.const " + vtI.size.toString() + "))\n    ";
           bodyR += "(local.set $" + letName + ")";
           for (let fi = 0; fi < fnames.length; fi++) {
-            const finfo = vtI.fields.get(fnames[fi])!;
+            const finfo = vtI.fields.get(fnames[fi]);
             bodyR += emitStructFieldStores("(local.get $" + letName + ")", finfo.offset,
                                            valList.children[fi + 1], finfo.typeName, env, locals);
           }
@@ -1595,11 +1595,11 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   if (op == "set!") {
     const name  = (list.children[1] as SymbolNode).name;
     if (env.globals.has(name)) {
-      const ginfo = env.globals.get(name)!;
+      const ginfo = env.globals.get(name);
       // Value-type struct global: fields live as separate sub-globals
       if (ginfo.isValueType) {
         const sName = ginfo.typeName.slice(1); // ":Point" → "Point"
-        const vtI   = env.types.get(sName)!;
+        const vtI   = env.types.get(sName);
         const rhsNode = list.children[2];
         if (rhsNode.tag == TAG_LIST) {
           const rhsList = rhsNode as ListNode;
@@ -1621,7 +1621,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       // Ref-type struct global: (set! g (TypeName f1 f2 ...)) → alloc + field stores
       const sName = ginfo.typeName.startsWith(":*") ? ginfo.typeName.slice(2) : ginfo.typeName.slice(1);
       if (env.types.has(sName)) {
-        const vtI = env.types.get(sName)!;
+        const vtI = env.types.get(sName);
         const rhsNode = list.children[2];
         if (rhsNode.tag == TAG_LIST) {
           const rhsList = rhsNode as ListNode;
@@ -1632,7 +1632,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
             out += "(global.set $" + name + ")";
             const fnames = vtI.fieldNames;
             for (let fi = 0; fi < fnames.length; fi++) {
-              const finfo = vtI.fields.get(fnames[fi])!;
+              const finfo = vtI.fields.get(fnames[fi]);
               out += emitStructFieldStores(
                 "(global.get $" + name + ")", finfo.offset,
                 rhsList.children[fi + 1], finfo.typeName, env, locals);
@@ -1857,7 +1857,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     const isSetter = rawField.endsWith("!");
     const field    = isSetter ? rawField.substring(0, rawField.length - 1) : rawField;
     // Tuple-local accessor: (pair/0) — no args, prefix is a tuple marker
-    if (locals.has(typeName) && locals.get(typeName)! == "tuple") {
+    if (locals.has(typeName) && locals.get(typeName) == "tuple") {
       return "(local.get $" + typeName + "_" + field + ")";
     }
     // :str fat-pointer accessor — access $varname_ptr or $varname_len directly.
@@ -1875,8 +1875,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       }
       // Named :*str static used directly — fold to compile-time constants.
       // The header layout is {ptr@0 = bytesAddr, len@4 = length}.
-      if (env.statics.has(varName) && env.statics.get(varName)!.typeName == ":*str") {
-        const info = env.statics.get(varName)!;
+      if (env.statics.has(varName) && env.statics.get(varName).typeName == ":*str") {
+        const info = env.statics.get(varName);
         if (field == "ptr") return "(i32.const " + (info.ptr + 8).toString() + ")";
         if (field == "len") return "(i32.const " + info.len.toString() + ")";
       }
@@ -1893,9 +1893,9 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     // Value-type struct field accessor: (Point/x p) where p has type :Point → local.get/set
     if (list.children.length > 1 && list.children[1].tag == TAG_SYMBOL) {
       const varName = (list.children[1] as SymbolNode).name;
-      if (locals.has(varName) && locals.get(varName)! == ":" + typeName) {
-        if (env.types.has(typeName) && env.types.get(typeName)!.fields.has(field)) {
-          const ft = env.types.get(typeName)!.fields.get(field)!.typeName;
+      if (locals.has(varName) && locals.get(varName) == ":" + typeName) {
+        if (env.types.has(typeName) && env.types.get(typeName).fields.has(field)) {
+          const ft = env.types.get(typeName).fields.get(field).typeName;
           // Embedded struct field → push all its leaf sub-locals (multi-value)
           if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
             if (isSetter) return ";; ERROR: cannot set embedded struct field directly; use sub-field setters";
@@ -1916,8 +1916,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         return "(local.get $" + varName + "_" + field + ")";
       }
       // Value-type struct *global* field accessor → global.get/set
-      if (env.globals.has(varName) && env.globals.get(varName)!.isValueType &&
-          env.globals.get(varName)!.typeName == ":" + typeName) {
+      if (env.globals.has(varName) && env.globals.get(varName).isValueType &&
+          env.globals.get(varName).typeName == ":" + typeName) {
         if (isSetter) {
           const val = codegenExpr(list.children[2], env, locals);
           return "(global.set $" + varName + "_" + field + " " + val + ")";
@@ -1940,8 +1940,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   }
 
   // ── Calling a function-typed local via call_indirect ──────────────────────
-  if (locals.has(op) && locals.get(op)!.startsWith(":func:")) {
-    const typeKey = locals.get(op)!.slice(6);
+  if (locals.has(op) && locals.get(op).startsWith(":func:")) {
+    const typeKey = locals.get(op).slice(6);
     let out = "(call_indirect (type $" + typeKey + ")";
     for (let i = 1; i < list.children.length; i++) {
       out += " " + codegenExpr(list.children[i], env, locals);

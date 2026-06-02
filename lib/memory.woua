@@ -1,0 +1,42 @@
+;; Memory management — bump allocator with automatic memory.grow.
+;;
+;; Included by core.woua, so available to all programs.
+;;
+;; heap-ptr: mutable global whose initial value is patched by the compiler to
+;;   the first byte past the static data section (8-byte aligned).
+;;   Read heap-ptr to inspect allocator state; do not write it directly.
+;;
+;; (alloc n) → :ptr — allocate n bytes (8-byte aligned), grow memory as needed.
+;;   memory.grow is called automatically when the new top exceeds the current
+;;   capacity.  Failure from memory.grow is silently ignored (the program will
+;;   trap on the next out-of-bounds store).
+
+(include core)
+
+;; ── Memory instructions ───────────────────────────────────────────────────────
+;; (memory-size) → :i32 — current linear memory size in 64 KiB pages.
+(defop memory-size "memory.size" () :i32)
+;; (memory-grow n) → :i32 — grow by n pages (64 KiB each); returns old size or -1.
+(defop memory-grow "memory.grow" (:i32) :i32)
+
+;; Bump allocator cursor.  The compiler patches the initial value to the end of
+;; the static data section; treat this global as read-only from user code.
+(defvar heap-ptr :ptr)
+
+;; Minimum number of pages to grow by at once (16 pages = 1 MiB).
+;; Amortises the cost of memory.grow calls for programs that allocate frequently.
+(defconst ALLOC-GROW-MIN 16)
+
+;; (alloc size) → :ptr
+;; Round size up to the next 8-byte boundary, advance heap-ptr, grow memory if
+;; the new top exceeds the current capacity (in chunks of at least ALLOC-GROW-MIN
+;; pages), and return the old heap-ptr.
+(defn alloc (size :i32) :ptr
+  (let ptr      :ptr heap-ptr
+    (let new-top :i32 (+ ptr (& (+ size 7) -8))
+      (let mem-bytes :i32 (* (memory-size) 65536)
+        (if (> new-top mem-bytes)
+          (let needed :i32 (/ (+ (- new-top mem-bytes) 65535) 65536)
+            (drop (memory-grow (if (> needed ALLOC-GROW-MIN) needed ALLOC-GROW-MIN)))))
+        (set! heap-ptr new-top)
+        ptr))))

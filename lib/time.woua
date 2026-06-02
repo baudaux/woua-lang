@@ -9,10 +9,17 @@
 
 (include wasi_p1)
 
+;; Scratch buffer for clock_time_get output — 8 bytes, allocated once in the
+;; static data section to avoid growing the heap on every clock call.
+;;
+;; TODO: for multi-threaded use this would need a per-thread buffer or
+;;       atomic operations; a single static is safe for single-threaded programs.
+(defstatic __time-buf :i64)
+
 ;; (time-now-ns) → i64
 ;; Returns the current monotonic time in nanoseconds.
 (defn time-now-ns () :i64
-  (let buf :ptr (alloc 8)
+  (let buf :ptr (static-ptr __time-buf)
     (let err :i32 (clock_time_get 1 1i64 buf)
       (if (= err 0)
         (i64.load buf)
@@ -21,7 +28,7 @@
 ;; (time-realtime-ns) → i64
 ;; Returns the current wall-clock time in nanoseconds since the Unix epoch.
 (defn time-realtime-ns () :i64
-  (let buf :ptr (alloc 8)
+  (let buf :ptr (static-ptr __time-buf)
     (let err :i32 (clock_time_get 0 1i64 buf)
       (if (= err 0)
         (i64.load buf)

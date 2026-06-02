@@ -5,7 +5,6 @@
   "patterns": [
     { "include": "#comment" },
     { "include": "#string" },
-    { "include": "#regex" },
     { "include": "#number" },
     { "include": "#type-annotation" },
     { "include": "#keyword" },
@@ -23,17 +22,6 @@
       "name": "string.quoted.double.woua",
       "begin": "\"",
       "end": "\"",
-      "patterns": [
-        {
-          "name": "constant.character.escape.woua",
-          "match": "\\\\."
-        }
-      ]
-    },
-    "regex": {
-      "name": "string.regexp.woua",
-      "begin": "/",
-      "end": "/",
       "patterns": [
         {
           "name": "constant.character.escape.woua",
@@ -63,11 +51,11 @@
     },
     "keyword": {
       "name": "keyword.control.woua",
-      "match": "\\b(if|while|let|set!|drop|as|include)\\b"
+      "match": "\\b(if|while|for|let|set!|drop|as|include|return|progn)\\b"
     },
     "builtin-op": {
       "name": "storage.type.woua",
-      "match": "\\b(defn|defmacro|deftype|defop|defimport|defliteral|defstatic)\\b"
+      "match": "\\b(defn|defmacro|deftype|defop|defimport|defliteral|defstatic|defconst|defvar)\\b"
     },
     "builtin-fn": {
       "name": "support.function.builtin.woua",

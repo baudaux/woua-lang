@@ -169,7 +169,7 @@
 ;; The integer part is handled via i64, so values up to 2^63 are supported.
 (defn f32->str (f :f32) :str
   (if (!= f f) "nan"
-  (if (and (= f (/ f 2.0)) (!= f 0.0))
+  (if (& (= f (/ f 2.0)) (!= f 0.0))
     (if (< f 0.0) "-inf" "inf")
     (let neg    :i32 (< f 0.0)
     (let fabs   :f64 (if neg (- 0.0f64 (as :f64 f)) (as :f64 f))
@@ -206,7 +206,7 @@
 ;; Like f32->str but operates entirely in f64 for greater precision.
 (defn f64->str (f :f64) :str
   (if (!= f f) "nan"
-  (if (and (= f (/ f 2.0f64)) (!= f 0.0f64))
+  (if (& (= f (/ f 2.0f64)) (!= f 0.0f64))
     (if (< f 0.0f64) "-inf" "inf")
     (let neg    :i32 (< f 0.0f64)
     (let fabs   :f64 (if neg (- 0.0f64 f) f)

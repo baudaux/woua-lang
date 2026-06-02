@@ -1,0 +1,93 @@
+;; wave_demo.woua — animated geometric sine waves
+;;
+;; Five colour-shifted sine waves scroll across a dark canvas.
+;; Each wave has a different vertical position, amplitude, and phase offset.
+;; The phase advances every frame producing smooth continuous scrolling motion.
+;;
+;; Browser setup: open demos/wave_demo.html via the local serve.py server.
+
+(include svg)
+(include math)
+
+;; Canvas dimensions
+(defconst W 600)
+(defconst H 350)
+
+;; Line segments per wave (higher = smoother, more bytes per frame)
+(defconst SEGS 80)
+
+;; Frame interval: 33 ms ≈ 30 fps
+(defconst FRAME-NS 33000000)
+
+;; Phase increment per frame: 2π / 90 → one full scroll cycle every ~3 s
+(defconst DPHI 0.06981317)
+
+;; Constants
+(defconst TWO-PI 6.2831855)
+
+;; Number of complete sine wavelengths visible across the canvas width
+(defconst FREQ 2.0)
+
+;; (draw-wave buf id cy ampl phase color) — build a sine-wave polyline into
+;; buf.  The element is created on the first call and upserted thereafter.
+;;   id    — SVG element id string
+;;   cy    — vertical centre in pixels (f32)
+;;   ampl  — half-amplitude in pixels (f32)
+;;   phase — current phase offset in radians (f32)
+;;   color — SVG stroke-color string
+(defn draw-wave (buf :*SvgBuf id :str cy :f32 ampl :f32 phase :f32 color :str) :void
+  ;; Emit: <path id="ID" d="M x0,y0 L x1,y1 ... L xN,yN"
+  ;;            fill="none" stroke="COLOR" stroke-width="3"/>
+  (__svg-str buf "<path id=\"")
+  (__svg-str buf id)
+  (__svg-str buf "\" d=\"")
+  (let i :i32 0
+    (while (<= i SEGS)
+      (let xi :i32 (/ (* i W) SEGS)
+        (let theta :f32 (+ phase (* TWO-PI (* FREQ (/ (as :f32 i) (as :f32 SEGS)))))
+          (let yi :i32 (as :i32 (round (- cy (* ampl (sin theta)))))
+            (if (= i 0)
+              (__svg-str buf "M ")
+              (__svg-str buf " L "))
+            (__svg-int buf xi)
+            (__svg-byte buf 44)     ;; ','
+            (__svg-int buf yi))))
+      (set! i (+ i 1))))
+  (__svg-str buf "\" fill=\"none\" stroke=\"")
+  (__svg-str buf color)
+  (__svg-str buf "\" stroke-width=\"3\"/>\n"))
+
+(defn main ()
+  (let svg-fd :i32 (open-file "/dev/svg" 0)
+    (let buf :*SvgBuf (svg-buf-new 8192)
+
+      ;; ── Root <svg> attributes ──────────────────────────────────────────
+      (svg-root-attr buf "width"   (i32->str W))
+      (svg-root-attr buf "height"  (i32->str H))
+      (svg-root-attr buf "viewBox"
+        (string-concat "0 0 "
+          (string-concat (i32->str W)
+            (string-concat " " (i32->str H)))))
+      (svg-root-style buf "background:#0d0d1a;")
+
+      ;; Static title
+      (svg-text buf "title" 10 24 "#555566" "woua wave demo")
+      (svg-flush-to buf svg-fd)
+
+      ;; ── Animation loop ──────────────────────────────────────────────────
+      ;; Five waves, evenly spaced vertically, phase-shifted by 2π/5 each.
+      (let phi :f32 0.0
+        (while 1
+          (poll-sleep-ns (as :i64 FRAME-NS))
+
+          (draw-wave buf "w0"  58.0 42.0 phi               "#ff3366")
+          (draw-wave buf "w1" 116.0 38.0 (+ phi 1.2566)    "#ff9900")
+          (draw-wave buf "w2" 175.0 50.0 (+ phi 2.5133)    "#33ffaa")
+          (draw-wave buf "w3" 233.0 36.0 (+ phi 3.7699)    "#3399ff")
+          (draw-wave buf "w4" 292.0 44.0 (+ phi 5.0265)    "#cc44ff")
+          (svg-flush-to buf svg-fd)
+
+          ;; Advance phase; wrap at 2π to prevent float drift over time
+          (set! phi (+ phi DPHI))
+          (if (>= phi TWO-PI)
+            (set! phi (- phi TWO-PI))))))))

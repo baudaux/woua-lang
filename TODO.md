@@ -61,7 +61,7 @@
 - [ ] #21 Unsigned arithmetic — `div_u`, `rem_u`, `lt_u`, `shr_u` variants in `lib/core.woua` for treating i32/i64 as unsigned
 - [x] #22 `defconst` — named compile-time integer constant: `(defconst MAX_LEN 256)`
 - [x] #23 Static strings as `str` structs — `(defstatic name :str "text")` stores an 8-byte `{base:i32, len:i32}` header followed by the raw bytes in the data section; `(static-ref name)` returns the header address (a `:str` pointer in linear memory); `(static-ptr name)` / `(static-len name)` kept for backward compatibility
-- [ ] #24 Bitwise operators in `lib/core.woua`: `band`, `bor`, `bxor`, `bnot`, `shl`, `shr`
+- [x] #24 Bitwise operators in `lib/core.woua`: `band`, `bor`, `bxor`, `bnot`, `shl`, `shr`
 - [ ] #48 Dynamic `:str` allocation — consistent in-memory `{base:i32, len:i32}` layout for runtime-built strings; add `(str-alloc maxlen)` → i32 pointer to a zeroed header+buffer in the heap; add `(str-set-ptr s ptr)` / `(str-set-len s len)` setters; `(str/ptr s)` / `(str/len s)` getters already work via the fat-pointer accessors; this makes static `(defstatic name :str "text")` and dynamic heap strings share the same representation, enabling arrays of `:str`, return by pointer, and eventually a string-builder API
 - [x] #25 Arrays — `Array` type as a `(ptr, len, capacity)` struct with index-get/set macros and optional bounds checking
 - [x] #26 Tuples — multi-value return via the WASM multi-value proposal: `(defn divmod (a b) (:i32 :i32) ...)` + destructuring `(let (q r) (divmod 10 3) ...)`; avoids struct allocation for result pairs

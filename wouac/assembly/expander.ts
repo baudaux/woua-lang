@@ -13,11 +13,11 @@ import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo, ProtocolInfo, Protocol
 // Register one WAT global per leaf field of a value-type struct.
 // Recurses into embedded structs so nested value types are fully flattened.
 function registerValueTypeSubGlobals(prefix: string, typeName: string, env: Env): void {
-  const typeInfo = env.types.get(typeName)!;
+  const typeInfo = env.types.get(typeName);
   const fnames = typeInfo.fieldNames;
   for (let fi = 0; fi < fnames.length; fi++) {
     const fname = fnames[fi];
-    const ft    = typeInfo.fields.get(fname)!.typeName;
+    const ft    = typeInfo.fields.get(fname).typeName;
     const sub   = prefix + "_" + fname;
     // Embedded value-type struct field → recurse
     if (!ft.startsWith(":*") && ft.startsWith(":") && env.types.has(ft.slice(1))) {
@@ -72,15 +72,15 @@ function evalConstInt(node: Node): IntVal | null {
 
   if (op == "string-length" && list.children.length == 2) {
     const s = getStringContent(list.children[1]);
-    if (s != null) return new IntVal(s!.length as i64);
+    if (s != null) return new IntVal(s.length as i64);
     return null;
   }
   if (op == "string-byte-at" && list.children.length == 3) {
     const s   = getStringContent(list.children[1]);
     const idx = evalConstInt(list.children[2]);
     if (s != null && idx != null) {
-      const i = i32(idx!.value);
-      if (i >= 0 && i < s!.length) return new IntVal(s!.charCodeAt(i) as i64);
+      const i = i32(idx.value);
+      if (i >= 0 && i < s.length) return new IntVal(s.charCodeAt(i) as i64);
       return new IntVal(-1 as i64); // out of bounds
     }
     return null;
@@ -94,15 +94,15 @@ function evalConstInt(node: Node): IntVal | null {
     const a = evalConstInt(list.children[1]);
     const b = evalConstInt(list.children[2]);
     if (a == null || b == null) return null;
-    if (op == "+")  return new IntVal(a!.value + b!.value);
-    if (op == "-")  return new IntVal(a!.value - b!.value);
-    if (op == "*")  return new IntVal(a!.value * b!.value);
-    if (op == "=")  return new IntVal(a!.value == b!.value ? 1 : 0);
-    if (op == "!=") return new IntVal(a!.value != b!.value ? 1 : 0);
-    if (op == "<")  return new IntVal(a!.value <  b!.value ? 1 : 0);
-    if (op == ">")  return new IntVal(a!.value >  b!.value ? 1 : 0);
-    if (op == "<=") return new IntVal(a!.value <= b!.value ? 1 : 0);
-    if (op == ">=") return new IntVal(a!.value >= b!.value ? 1 : 0);
+    if (op == "+")  return new IntVal(a.value + b.value);
+    if (op == "-")  return new IntVal(a.value - b.value);
+    if (op == "*")  return new IntVal(a.value * b.value);
+    if (op == "=")  return new IntVal(a.value == b.value ? 1 : 0);
+    if (op == "!=") return new IntVal(a.value != b.value ? 1 : 0);
+    if (op == "<")  return new IntVal(a.value <  b.value ? 1 : 0);
+    if (op == ">")  return new IntVal(a.value >  b.value ? 1 : 0);
+    if (op == "<=") return new IntVal(a.value <= b.value ? 1 : 0);
+    if (op == ">=") return new IntVal(a.value >= b.value ? 1 : 0);
   }
   return null;
 }
@@ -128,7 +128,7 @@ function expandNode(node: Node, env: Env): Node {
   if (node.tag == TAG_SYMBOL) {
     const symName = (node as SymbolNode).name;
     if (env.macros.has(symName)) {
-      const m = env.macros.get(symName)!;
+      const m = env.macros.get(symName);
       if (m.params.length == 0 && m.restParam == "") {
         return expandNode(expandMacroCall(m, new Array<Node>(), env), env);
       }
@@ -151,7 +151,7 @@ function expandNode(node: Node, env: Env): Node {
     }
 
     if (env.macros.has(name)) {
-      const macro = env.macros.get(name)!;
+      const macro = env.macros.get(name);
       const args  = list.tail();
       // Expand macro call, then recursively expand the result
       return expandNode(expandMacroCall(macro, args, env), env);
@@ -171,7 +171,7 @@ function expandNode(node: Node, env: Env): Node {
         env.errors.push("sizeof: unknown type '" + typeName + "'");
         return new IntNode(0 as i64);
       }
-      return new IntNode(env.types.get(structName)!.size as i64);
+      return new IntNode(env.types.get(structName).size as i64);
     }
     // compile-time static-ptr / static-len / static-ref intrinsics
     if (name == "static-ptr" || name == "static-len" || name == "static-ref") {
@@ -181,7 +181,7 @@ function expandNode(node: Node, env: Env): Node {
         env.errors.push(name + ": unknown static '" + symName + "'");
         return new IntNode(0 as i64);
       }
-      const info = env.statics.get(symName)!;
+      const info = env.statics.get(symName);
       // static-ref  → header address (only meaningful for :str statics)
       // static-ptr  → for :str statics, base = hdrPtr+8; otherwise ptr
       // static-len  → byte length
@@ -200,7 +200,7 @@ function expandNode(node: Node, env: Env): Node {
     // ── (string-byte-at str idx) — compile-time byte value at index ───────
     if (name == "string-length" || name == "string-byte-at") {
       const v = evalConstInt(list);
-      if (v != null) return new IntNode(v!.value);
+    if (v != null) return new IntNode(v.value);
       env.errors.push(name + ": arguments must be compile-time string/integer constants");
       return new IntNode(0 as i64);
     }
@@ -251,7 +251,7 @@ function expandNode(node: Node, env: Env): Node {
         env.errors.push("macro-if: condition is not a compile-time integer");
         return new IntNode(0 as i64);
       }
-      if (cv!.value != 0) return expandNode(list.children[2], env);
+      if (cv.value != 0) return expandNode(list.children[2], env);
       if (list.children.length > 3) return expandNode(list.children[3], env);
       return new IntNode(0 as i64);
     }
@@ -333,7 +333,7 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
   if (node.tag == TAG_SYMBOL) {
     const name = (node as SymbolNode).name;
     if (subst.has(name)) {
-      const sub = subst.get(name)!;
+      const sub = subst.get(name);
       // A macro argument that is a string literal must also be interned here.
       if (sub.tag == TAG_STRING) {
         internString((sub as StringNode).value, env);
@@ -356,7 +356,7 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
           env.errors.push(head + ": unknown static '" + symName + "'");
           return new IntNode(0 as i64);
         }
-        const info = env.statics.get(symName)!;
+        const info = env.statics.get(symName);
         let val: i64;
         if (head == "static-ref") {
           val = info.ptr as i64;
@@ -380,7 +380,7 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
           env.errors.push("sizeof: unknown type '" + typeName + "'");
           return new IntNode(0 as i64);
         }
-        return new IntNode(env.types.get(structName)!.size as i64);
+        return new IntNode(env.types.get(structName).size as i64);
       }
     }
     const result = new ListNode();
@@ -600,14 +600,14 @@ function expandPrintf(list: ListNode, env: Env): Node {
   // Get or generate the dedicated function for this format string
   let funcName = "";
   if (env.printfFuncsByFmt.has(fmtStr)) {
-    funcName = env.printfFuncsByFmt.get(fmtStr)!;
+    funcName = env.printfFuncsByFmt.get(fmtStr);
   } else {
     // Derive base name from argument types: __printf_i32, __printf_i32_i64, etc.
     const probeTypes = printfArgTypes(fmtStr);
     const typeSig = probeTypes.length > 0 ? probeTypes.join("_") : "str";
     const baseName = "__printf_" + typeSig;
     // Disambiguate collisions with a suffix counter
-    const count = env.printfNameCounts.has(baseName) ? env.printfNameCounts.get(baseName)! : 0;
+    const count = env.printfNameCounts.has(baseName) ? env.printfNameCounts.get(baseName) : 0;
     env.printfNameCounts.set(baseName, count + 1);
     funcName = count == 0 ? baseName : baseName + "_" + (count + 1).toString();
     env.printfFuncsByFmt.set(fmtStr, funcName);
@@ -793,6 +793,15 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
       env.globalNames.push(varName);
       continue;
     }
+    // ── (shared-memory) — declare the linear memory as shared ────────────────
+    // Required when the WASM module runs in a Worker and shares its memory with
+    // the main thread (e.g. when using lib/svg.woua).  Emits
+    // (memory 1 65536 shared) instead of (memory 1).
+    if (headName == "shared-memory") {
+      env.usesSvg = true;
+      continue;
+    }
+
     // ── (defimport name "module" "field" (param-types...) result-type?) ─────
     if (headName == "defimport") {
       // children: [defimport, name, "module", "field", (params...), result?]
@@ -863,7 +872,7 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
         env.errors.push("defimpl: unknown protocol '" + protoName + "'");
         continue;
       }
-      const proto = env.protocols.get(protoName)!;
+      const proto = env.protocols.get(protoName);
       const provided = new Set<string>();
 
       for (let j = 3; j < list.children.length; j++) {
@@ -881,7 +890,7 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
             + ": method '" + methodName + "' is not part of the protocol");
           continue;
         }
-        const sig = proto.methods.get(methodName)!;
+        const sig = proto.methods.get(methodName);
 
         // Extract param types from the defn form
         const paramsList = defnList.children[2] as ListNode;
@@ -934,7 +943,7 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
           concreteParams.push(sig.params[k] == ":*Self" ? ":*" + typeName : sig.params[k]);
         }
         if (!env.ops.has(methodName)) env.ops.set(methodName, new Array<OpInfo>());
-        env.ops.get(methodName)!.push(
+        env.ops.get(methodName).push(
           new OpInfo(methodName, mangledName, concreteParams, sig.result));
 
         provided.add(methodName);
@@ -965,7 +974,7 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
         ? (list.children[4] as SymbolNode).name
         : "";
       if (!env.ops.has(iName)) env.ops.set(iName, new Array<OpInfo>());
-      env.ops.get(iName)!.push(new OpInfo(iName, watOp, iParams, iResult));
+      env.ops.get(iName).push(new OpInfo(iName, watOp, iParams, iResult));
       continue;
     }
 

@@ -24,7 +24,7 @@
               (let echo :u8 (Tty/echo t)
                 (if (>= cols 0) (printf "cols>=0\n"))
                 (if (>= rows 0) (printf "rows>=0\n"))
-                (if (or (= echo 0) (= echo 1))
+                (if (| (= echo 0) (= echo 1))
                   (printf "echo in 0..1\n")))))
           ;; Write the state back unchanged
           (let se :i32 (tty-set t)

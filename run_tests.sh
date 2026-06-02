@@ -20,7 +20,6 @@ done
 vcmd() { if [ "$VERBOSE" -eq 1 ]; then echo "  + $*" >&2; fi; }
 
 mkdir -p "$OUT"
-mkdir tmp
 
 for src in "$TESTS"/*.woua; do
   name="$(basename "$src" .woua)"
@@ -40,8 +39,8 @@ for src in "$TESTS"/*.woua; do
       FAIL=$((FAIL + 1))
       continue
     fi
-    vcmd "wat2wasm $wat_rel -o $wasm_file"
-    if ! wat2wasm "$OUT/$name.wat" -o "$wasm_file" 2>/dev/null; then
+    vcmd "wat2wasm --enable-threads $wat_rel -o $wasm_file"
+    if ! wat2wasm --enable-threads "$OUT/$name.wat" -o "$wasm_file" 2>/dev/null; then
       echo "FAIL  $name  (wat2wasm error)"
       FAIL=$((FAIL + 1))
       continue
@@ -98,9 +97,9 @@ for src in "$TESTS"/*.woua; do
     src_rel="tests/$name.woua"
     err_wat="tests/out/$name.wat"
     vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $err_wat"
-    vcmd "wat2wasm $err_wat -o tests/out/$name.wasm"
+    vcmd "wat2wasm --enable-threads $err_wat -o tests/out/$name.wasm"
     if (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$err_wat" 2>/dev/null) \
-        && wat2wasm "$OUT/$name.wat" -o "$OUT/$name.wasm" 2>/dev/null; then
+        && wat2wasm --enable-threads "$OUT/$name.wat" -o "$OUT/$name.wasm" 2>/dev/null; then
       echo "FAIL  $name  (expected compile error, but compiled successfully)"
       FAIL=$((FAIL + 1))
     else
@@ -138,8 +137,8 @@ for src in "$TESTS"/*.woua; do
     FAIL=$((FAIL + 1))
     continue
   fi
-  vcmd "wat2wasm $wat_file -o $wasm_file"
-  if ! wat2wasm "$wat_file" -o "$wasm_file" 2>/dev/null; then
+  vcmd "wat2wasm --enable-threads $wat_file -o $wasm_file"
+  if ! wat2wasm --enable-threads "$wat_file" -o "$wasm_file" 2>/dev/null; then
     echo "FAIL  $name  (wat2wasm error)"
     FAIL=$((FAIL + 1))
     continue

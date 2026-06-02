@@ -28,8 +28,8 @@
       (let rc2 :i32 (poll-fds (Array/ptr subs2) 2 1000000i64 (Array/ptr evts2))
         (let e0 :*PollEvent (array-ptr PollEvent evts2 0)
           (let e1 :*PollEvent (array-ptr PollEvent evts2 1)
-            (if (and (= rc2 0)
-                     (and (= (PollEvent/ready e0) 1)
+            (if (& (= rc2 0)
+                     (& (= (PollEvent/ready e0) 1)
                           (= (PollEvent/ready e1) 1)))
               (printf "stdout+stderr both ready\n")
               (printf "unexpected: rc=%d out=%d err=%d\n"
@@ -44,7 +44,7 @@
         (PollSub/type! s POLL-READ))
       (let rc1 :i32 (poll-fds (Array/ptr subs1) 1 -1i64 (Array/ptr evts1))
         (let e :*PollEvent (array-ptr PollEvent evts1 0)
-          (if (and (= rc1 0) (= (PollEvent/ready e) 1))
+          (if (& (= rc1 0) (= (PollEvent/ready e) 1))
             (progn
               (printf "stdin ready\n")
               (let buf :ptr (alloc 256)

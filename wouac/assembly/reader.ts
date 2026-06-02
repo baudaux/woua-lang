@@ -89,7 +89,7 @@ export class Reader {
     const lits  = this.env.literals;
     const names = lits.keys();
     for (let i = 0; i < names.length; i++) {
-      const info = lits.get(names[i])!;
+      const info = lits.get(names[i]);
       if (info.nodeType == ":i32" || info.nodeType == ":i64" ||
           info.nodeType == ":f32" || info.nodeType == ":f64" ||
           info.nodeType == ":v128" ||
@@ -217,7 +217,7 @@ export class Reader {
     const lits  = this.env.literals;
     const names = lits.keys();
     for (let i = 0; i < names.length; i++) {
-      const info = lits.get(names[i])!;
+      const info = lits.get(names[i]);
       if (info.suffix.length == 0) continue;
       if (!token.endsWith(info.suffix)) continue;
       const base = token.slice(0, token.length - info.suffix.length);
@@ -234,7 +234,7 @@ export class Reader {
         return new FloatNode(F64.parseFloat(base), info.nodeType == ":f64");
     }
     for (let i = 0; i < names.length; i++) {
-      const info = lits.get(names[i])!;
+      const info = lits.get(names[i]);
       if (info.suffix.length != 0) continue;
       if (info.nodeType == ":i32" || info.nodeType == ":i64") {
         if (info.prefix.length > 0 && token.startsWith(info.prefix)) {
@@ -252,7 +252,7 @@ export class Reader {
     // e.g. `1:2:3:4i32x4`, `5f32x4` (splat). Lane count is derived from the
     // suffix: the digits after the last 'x' ("i32x4" → 4, "i8x16" → 16).
     for (let i = 0; i < names.length; i++) {
-      const info = lits.get(names[i])!;
+      const info = lits.get(names[i]);
       if (info.nodeType != ":v128" && info.nodeType != ":i8x16" && info.nodeType != ":i16x8" &&
           info.nodeType != ":i32x4" && info.nodeType != ":i64x2" &&
           info.nodeType != ":f32x4" && info.nodeType != ":f64x2") continue;

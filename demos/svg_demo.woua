@@ -15,7 +15,6 @@
 ;;   wasi.start(instance);
 
 (include svg)
-(include time)
 
 ;; Canvas dimensions
 (defconst CANVAS-W 400)
@@ -24,58 +23,53 @@
 ;; Ball radius
 (defconst BALL-R  18)
 
-;; Number of animation frames
-(defconst FRAMES 300)
-
-;; Frame delay in milliseconds (~33 ms ≈ 30 fps)
-(defconst FRAME-MS 33)
+;; Frame delay (~33 ms ≈ 30 fps) expressed in nanoseconds for poll-sleep-ns
+(defconst FRAME-NS 33000000)
 
 (defn main ()
-  (let buf :*SvgBuf (svg-buf-new 4096)
+  (let svg-fd :i32 (open-file "/dev/svg" 0)
+    (let buf :*SvgBuf (svg-buf-new 4096)
+
+    ;; ── Root <svg> attributes ─────────────────────────────────────────────
+    (svg-root-attr buf "width"   (i32->str CANVAS-W))
+    (svg-root-attr buf "height"  (i32->str CANVAS-H))
+    (svg-root-attr buf "viewBox" (string-concat "0 0 " (string-concat (i32->str CANVAS-W) (string-concat " " (i32->str CANVAS-H)))))
 
     ;; ── Static background ─────────────────────────────────────────────────
 
     ;; Sky background
     (svg-rect buf "bg" 0 0 CANVAS-W CANVAS-H "#87CEEB")
-    (svg-flush buf)
 
     ;; Ground strip
     (svg-rect buf "ground" 0 240 CANVAS-W 60 "#228B22")
-    (svg-flush buf)
 
     ;; Sun
     (svg-circle buf "sun" 340 50 30 "#FFD700")
-    (svg-flush buf)
 
     ;; A tree trunk
     (svg-rect buf "trunk" 80 180 16 60 "#8B4513")
-    (svg-flush buf)
 
     ;; Tree canopy
     (svg-circle buf "canopy" 88 165 36 "#006400")
-    (svg-flush buf)
 
     ;; Title text
     (svg-text buf "title" 120 30 "#003366" "woua SVG demo")
-    (svg-flush buf)
 
     ;; ── Bouncing ball ─────────────────────────────────────────────────────
 
-    ;; Draw ball at initial position
+    ;; Draw ball at initial position — flush the complete static scene
     (svg-circle buf "ball" 50 220 BALL-R "#FF4500")
-    (svg-flush buf)
+    (svg-flush-to buf svg-fd)
 
-    ;; Animation loop: bounce the ball horizontally and vertically
-    (let frame :i32 0
-      (let bx    :i32 50
-        (let by    :i32 220
-          (let dx    :i32 4
-            (let dy    :i32 -3
-              (while (< frame FRAMES)
+    ;; Animation loop: bounce the ball horizontally and vertically (infinite)
+    (let bx    :i32 50
+      (let by    :i32 220
+        (let dx    :i32 4
+          (let dy    :i32 -3
+            (while 1
 
-                ;; Busy-wait one frame
-                (let t0 :i64 (time-now-ms)
-                  (while (< (time-elapsed-ms t0) (as :i64 FRAME-MS)) 0))
+                ;; Passive sleep for one frame duration
+                (poll-sleep-ns (as :i64 FRAME-NS))
 
                 ;; Update position
                 (set! bx (+ bx dx))
@@ -103,10 +97,4 @@
 
                 ;; Re-emit the ball with updated position (upsert by id)
                 (svg-circle buf "ball" bx by BALL-R "#FF4500")
-                (svg-flush buf)
-
-                (set! frame (+ frame 1))))))))
-
-    ;; Farewell text
-    (svg-text buf "done-text" 120 270 "#003366" "done!")
-    (svg-flush buf)))
+                (svg-flush-to buf svg-fd)))))))))

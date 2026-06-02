@@ -1,0 +1,23 @@
+;; @test memory_grow
+;; @feature alloc triggers memory.grow on plain (non-shared) memory
+;; @expect-wat
+;;   (memory 1)
+;; @expect
+;;   pages before=1
+;;   pages after=2
+;;   value at start=42
+;;   value at end=99
+
+(include memory)
+(include io)
+
+;; Allocate slightly more than one full page (65536 bytes) so memory.grow fires.
+(defn main () :void
+  (printf "pages before=%d\n" (memory-size))
+  ;; Allocate 70000 bytes — enough to cross the 64 KiB page boundary.
+  (let p :ptr (alloc 70000)
+    (i32.store p 42)
+    (i32.store (+ p 69996) 99)  ;; last 4 bytes of the buffer
+    (printf "pages after=%d\n" (memory-size))
+    (printf "value at start=%d\n" (i32.load p))
+    (printf "value at end=%d\n" (i32.load (+ p 69996)))))

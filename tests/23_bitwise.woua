@@ -1,25 +1,25 @@
 ;; @test bitwise
-;; @feature bitwise not / and / or / xor operators for i32 and i64
+;; @feature bitwise not/!/xor/band/bor/bxor/&/|/^ operators for i32 and i64
 ;; @expect
-;;   not 0 = 1
-;;   not 1 = 0
-;;   and 6 3 = 2
-;;   or  6 3 = 7
-;;   xor 6 3 = 5
-;;   not 0i64 = 1
-;;   and 6i64 3i64 = 2
-;;   or  6i64 3i64 = 7
-;;   xor 6i64 3i64 = 5
+;;   ! 0 = 1
+;;   ! 1 = 0
+;;   & 6 3 = 2
+;;   | 6 3 = 7
+;;   ^ 6 3 = 5
+;;   ! 0i64 = 1
+;;   & 6i64 3i64 = 2
+;;   | 6i64 3i64 = 7
+;;   ^ 6i64 3i64 = 5
 
 (include io)
 
 (defn main ()
-  (printf "not 0 = %d\n" (not 0))
-  (printf "not 1 = %d\n" (not 1))
-  (printf "and 6 3 = %d\n" (and 6 3))
-  (printf "or  6 3 = %d\n" (or  6 3))
-  (printf "xor 6 3 = %d\n" (xor 6 3))
-  (printf "not 0i64 = %d\n" (not 0i64))
-  (printf "and 6i64 3i64 = %d\n" (as :i32 (and 6i64 3i64)))
-  (printf "or  6i64 3i64 = %d\n" (as :i32 (or  6i64 3i64)))
-  (printf "xor 6i64 3i64 = %d\n" (as :i32 (xor 6i64 3i64))))
+  (printf "! 0 = %d\n" (! 0))
+  (printf "! 1 = %d\n" (! 1))
+  (printf "& 6 3 = %d\n" (& 6 3))
+  (printf "| 6 3 = %d\n" (| 6 3))
+  (printf "^ 6 3 = %d\n" (^ 6 3))
+  (printf "! 0i64 = %d\n" (! 0i64))
+  (printf "& 6i64 3i64 = %d\n" (as :i32 (& 6i64 3i64)))
+  (printf "| 6i64 3i64 = %d\n" (as :i32 (| 6i64 3i64)))
+  (printf "^ 6i64 3i64 = %d\n" (as :i32 (^ 6i64 3i64))))

@@ -225,8 +225,7 @@ export class Env {
   errors: Array<string> = new Array<string>();
 
   // ── Compiler options ─────────────────────────────────────────────────────
-  noPeephole: bool = false;
-
+  noPeephole: bool = false;  usesSvg:    bool = false;  // true when lib/svg.woua is included → emit shared memory
   // ── Alignment helpers ────────────────────────────────────────────────────────
 
   alignOf(typeName: string): i32 {
@@ -239,8 +238,8 @@ export class Env {
     if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
     // Embedded struct: align to first field
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1))) {
-      const ti = this.types.get(typeName.slice(1))!;
-      if (ti.fieldNames.length > 0) return this.alignOf(ti.fields.get(ti.fieldNames[0])!.typeName);
+      const ti = this.types.get(typeName.slice(1));
+      if (ti.fieldNames.length > 0) return this.alignOf(ti.fields.get(ti.fieldNames[0]).typeName);
       return 4;
     }
     return 4;
@@ -256,7 +255,7 @@ export class Env {
     if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
     // Embedded struct: size from env.types
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1)))
-      return this.types.get(typeName.slice(1))!.size;
+      return this.types.get(typeName.slice(1)).size;
     return 4; // fallback
   }
 

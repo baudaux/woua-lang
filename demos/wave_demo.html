@@ -2,16 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>woua SVG demo</title>
+  <title>woua wave demo</title>
   <style>
     body  { font-family: sans-serif; margin: 2rem; background: #f5f5f5; }
     h2    { margin-bottom: 0.5rem; }
-    #canvas svg { display: block; border: 1px solid #bbb; border-radius: 4px; }
+    #canvas svg { display: block; border: 1px solid #333; border-radius: 4px; }
     #status { margin-top: 0.5rem; color: #555; font-size: 0.9rem; }
   </style>
 </head>
 <body>
-  <h2>woua SVG demo</h2>
+  <h2>woua wave demo</h2>
   <div id="canvas"></div>
   <p id="status">Loading…</p>
 
@@ -22,9 +22,9 @@
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const host = document.getElementById('canvas');
     const svg  = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('width',   '400');
-    svg.setAttribute('height',  '300');
-    svg.setAttribute('viewBox', '0 0 400 300');
+    svg.setAttribute('width',   '600');
+    svg.setAttribute('height',  '350');
+    svg.setAttribute('viewBox', '0 0 600 350');
     host.appendChild(svg);
 
     const defs = document.createElementNS(SVG_NS, 'defs');
@@ -41,14 +41,14 @@
     );
 
     worker.onmessage = ({ data }) => {
-      if (data.type === 'memory') window.wasmMemory = data.memory; // SharedArrayBuffer-backed
+      if (data.type === 'memory') window.wasmMemory = data.memory;
       if (data.type === 'svg')    processMessage(data.line);
       if (data.type === 'exit')   status.textContent = `Done (exit ${data.code}).`;
       if (data.type === 'error')  status.textContent = `Error: ${data.message}`;
     };
 
-    worker.postMessage({ type: 'start', wasmUrl: 'out/svg_demo.wasm' });
-    status.textContent = 'Running… (~10 s animation)';
+    worker.postMessage({ type: 'start', wasmUrl: 'out/wave_demo.wasm' });
+    status.textContent = 'Running…';
   </script>
 </body>
 </html>

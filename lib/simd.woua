@@ -64,6 +64,21 @@
 (defop v128-load  "v128.load"  (:i32)        :v128)  ;; load 16 bytes from ptr
 (defop v128-store "v128.store" (:i32 :v128)  :void)  ;; store 16 bytes to ptr
 
+;; Typed load/store — same WAT instruction as v128.load/store but return/accept
+;; the specific SIMD subtype so no (as :fXXxY …) cast is needed at call sites.
+(defop i8x16-load  "v128.load"  (:i32)         :i8x16)
+(defop i8x16-store "v128.store" (:i32 :i8x16)  :void)
+(defop i16x8-load  "v128.load"  (:i32)         :i16x8)
+(defop i16x8-store "v128.store" (:i32 :i16x8)  :void)
+(defop i32x4-load  "v128.load"  (:i32)         :i32x4)
+(defop i32x4-store "v128.store" (:i32 :i32x4)  :void)
+(defop i64x2-load  "v128.load"  (:i32)         :i64x2)
+(defop i64x2-store "v128.store" (:i32 :i64x2)  :void)
+(defop f32x4-load  "v128.load"  (:i32)         :f32x4)
+(defop f32x4-store "v128.store" (:i32 :f32x4)  :void)
+(defop f64x2-load  "v128.load"  (:i32)         :f64x2)
+(defop f64x2-store "v128.store" (:i32 :f64x2)  :void)
+
 ;; ── v128 bitwise ─────────────────────────────────────────────────────────────
 (defop v-and    "v128.and"    (:v128 :v128) :v128)
 (defop v-or     "v128.or"     (:v128 :v128) :v128)
