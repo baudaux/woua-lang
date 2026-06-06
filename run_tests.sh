@@ -20,6 +20,7 @@ done
 vcmd() { if [ "$VERBOSE" -eq 1 ]; then echo "  + $*" >&2; fi; }
 
 mkdir -p "$OUT"
+mkdir -p tmp
 
 for src in "$TESTS"/*.woua; do
   name="$(basename "$src" .woua)"
