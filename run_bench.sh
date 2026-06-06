@@ -7,7 +7,7 @@
 #   ./run_bench.sh fib        # run only the fib benchmark
 #
 # Requirements:
-#   wasmtime, wat2wasm, rustc with wasm32-wasip1 target
+#   wasmtime, rustc with wasm32-wasip1 target
 #   (install: rustup target add wasm32-wasip1)
 #
 # Output format (one block per benchmark):
@@ -52,17 +52,11 @@ run_bench() {
 
   printf "▶ %-14s  " "$name"
 
-  # ── Compile woua → WAT ────────────────────────────────────────────────────
+  # ── Compile woua → WASM ───────────────────────────────────────────────────
   local t0 t1 woua_build_ms
   t0=$(date +%s%3N)
-  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$woua_src_rel" -o "$wat_rel" 2>/dev/null); then
+  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$woua_src_rel" -o "$wat_rel" -wasm 2>/dev/null); then
     echo "SKIP (woua compile error)"
-    return
-  fi
-
-  # ── WAT → WASM ────────────────────────────────────────────────────────────
-  if ! wat2wasm "$wat_file" -o "$wasm_file" 2>/dev/null; then
-    echo "SKIP (wat2wasm error)"
     return
   fi
   t1=$(date +%s%3N)

@@ -10,25 +10,25 @@
 
 (defn main () :void
   (drop (memory-grow 16))
-  (let buf :ptr (alloc SIEVE-N)
-    (let start :i64 (time-now-ns)
-      (for k 0 SIEVE-N
-        (i32.store8 (+ buf k) 1))
-      (i32.store8 buf 0)
-      (i32.store8 (+ buf 1) 0)
-      (let p :i32 2
-        (while (<= (* p p) SIEVE-N)
-          (if (= (i32.load8_u (+ buf p)) 1)
-            (let j :i32 (* p p)
-              (while (< j SIEVE-N)
-                (i32.store8 (+ buf j) 0)
-                (set! j (+ j p)))))
-          (set! p (+ p 1))))
-      (let count :i32 0
-        (for m 0 SIEVE-N
-          (if (= (i32.load8_u (+ buf m)) 1)
-            (set! count (+ count 1))))
-        (let elapsed :i64 (- (time-now-ns) start)
-          (printf "primes below %d: %d, time = %ld ms\n"
-            SIEVE-N count
-            (/ elapsed 1000000i64)))))))
+  (let* ((buf   :ptr (alloc SIEVE-N))
+         (start :i64 (time-now-ns)))
+    (for k 0 SIEVE-N
+      (i32.store8 (+ buf k) 1))
+    (i32.store8 buf 0)
+    (i32.store8 (+ buf 1) 0)
+    (let p :i32 2
+      (while (<= (* p p) SIEVE-N)
+        (if (= (i32.load8_u (+ buf p)) 1)
+          (let j :i32 (* p p)
+            (while (< j SIEVE-N)
+              (i32.store8 (+ buf j) 0)
+              (set! j (+ j p)))))
+        (set! p (+ p 1))))
+    (let count :i32 0
+      (for m 0 SIEVE-N
+        (if (= (i32.load8_u (+ buf m)) 1)
+          (set! count (+ count 1))))
+      (let elapsed :i64 (- (time-now-ns) start)
+        (printf "primes below %d: %d, time = %ld ms\n"
+          SIEVE-N count
+          (/ elapsed 1000000i64))))))

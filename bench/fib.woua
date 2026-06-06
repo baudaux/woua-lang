@@ -10,9 +10,9 @@
     (+ (fib (- n 1)) (fib (- n 2)))))
 
 (defn main () :void
-  (let start :i64 (time-now-ns)
-    (let result :i32 (fib 43)
-      (let elapsed :i64 (- (time-now-ns) start)
-        (printf "fib(43) = %d, time = %ld ms\n"
-          result
-          (/ elapsed 1000000i64))))))
+  (let* ((start   :i64 (time-now-ns))
+         (result  :i32 (fib 43))
+         (elapsed :i64 (- (time-now-ns) start)))
+    (printf "fib(43) = %d, time = %ld ms\n"
+      result
+      (/ elapsed 1000000i64))))

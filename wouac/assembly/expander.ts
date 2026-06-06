@@ -107,6 +107,80 @@ function evalConstInt(node: Node): IntVal | null {
   return null;
 }
 
+// ── Compile-time constant folding ─────────────────────────────────────────────
+
+// Try to evaluate `node` as a compile-time numeric constant (integer or float).
+// Returns an IntNode or FloatNode on success, null if any sub-expression is
+// not a compile-time constant.  Previously-defined defconst names are resolved
+// via env.macros.  For integer division/modulo by zero, an error is pushed into
+// env.errors before returning null.
+function constFold(node: Node, env: Env): Node | null {
+  if (node.tag == TAG_INT)   return node;
+  if (node.tag == TAG_FLOAT) return node;
+
+  // Symbol: resolve as a previously-folded defconst (zero-param macro with literal body).
+  if (node.tag == TAG_SYMBOL) {
+    const sym = (node as SymbolNode).name;
+    if (env.macros.has(sym)) {
+      const m = env.macros.get(sym);
+      if (m.params.length == 0 && m.restParam == "") {
+        const b = m.body;
+        if (b.tag == TAG_INT || b.tag == TAG_FLOAT) return b;
+      }
+    }
+    return null;
+  }
+
+  if (node.tag != TAG_LIST) return null;
+  const list = node as ListNode;
+  if (list.children.length != 3) return null;
+  if (list.children[0].tag != TAG_SYMBOL) return null;
+  const op = (list.children[0] as SymbolNode).name;
+
+  const lhs = constFold(list.children[1], env);
+  const rhs = constFold(list.children[2], env);
+  if (lhs == null || rhs == null) return null;
+
+  // Both operands are integers.
+  if (lhs.tag == TAG_INT && rhs.tag == TAG_INT) {
+    const a    = (lhs as IntNode).value;
+    const b    = (rhs as IntNode).value;
+    const wide: bool = (lhs as IntNode).wide || (rhs as IntNode).wide;
+    if (op == "+")   return new IntNode(a + b, wide);
+    if (op == "-")   return new IntNode(a - b, wide);
+    if (op == "*")   return new IntNode(a * b, wide);
+    if (op == "/") {
+      if (b == 0) { env.errors.push("defconst: integer division by zero"); return null; }
+      return new IntNode(a / b, wide);
+    }
+    if (op == "%") {
+      if (b == 0) { env.errors.push("defconst: modulo by zero"); return null; }
+      return new IntNode(a % b, wide);
+    }
+    if (op == "<<")  return new IntNode(a << b, wide);
+    if (op == ">>")  return new IntNode(a >> b, wide);
+    if (op == "and") return new IntNode(a & b, wide);
+    if (op == "or")  return new IntNode(a | b, wide);
+    if (op == "xor") return new IntNode(a ^ b, wide);
+    return null;
+  }
+
+  // At least one float operand → promote both to f64, result is float.
+  if (lhs.tag == TAG_FLOAT || rhs.tag == TAG_FLOAT) {
+    const a: f64 = lhs.tag == TAG_INT ? f64((lhs as IntNode).value) : (lhs as FloatNode).value;
+    const b: f64 = rhs.tag == TAG_INT ? f64((rhs as IntNode).value) : (rhs as FloatNode).value;
+    const wide: bool = (lhs.tag == TAG_FLOAT ? (lhs as FloatNode).wide : false) ||
+                       (rhs.tag == TAG_FLOAT ? (rhs as FloatNode).wide : false);
+    if (op == "+") return new FloatNode(a + b, wide);
+    if (op == "-") return new FloatNode(a - b, wide);
+    if (op == "*") return new FloatNode(a * b, wide);
+    if (op == "/") return new FloatNode(a / b, wide); // ±Infinity on /0 (IEEE 754)
+    return null;
+  }
+
+  return null;
+}
+
 // ── User-macro expansion ──────────────────────────────────────────────────────
 
 // Recursively walk `node`, expanding any user-defined macro calls found in env.
@@ -148,6 +222,11 @@ function expandNode(node: Node, env: Env): Node {
     // (defmacro printf ...) definition in io.woua.
     if (name == "printf") {
       return expandPrintf(list, env);
+    }
+
+    // ── (sprintf buf "fmt" args...) — write formatted string into a buffer ───
+    if (name == "sprintf") {
+      return expandSprintf(list, env);
     }
 
     if (env.macros.has(name)) {
@@ -282,6 +361,145 @@ function expandNode(node: Node, env: Env): Node {
       seq.children.push(new SymbolNode("macro-seq"));
       for (let k = 0; k < items.length; k++) seq.children.push(items[k]);
       return expandNode(seq, env);
+    }
+
+    // ── (let* ((n1 v1) (n2 v2) ...) body...) — sequential let bindings ──────
+    // Desugars to nested (let n val body) forms so each binding is in scope for
+    // the next.  Each pair may be (name val) or (name :Type val).
+    if (name == "let*") {
+      if (list.children.length < 3 || list.children[1].tag != TAG_LIST) {
+        env.errors.push("let*: expected (let* ((name val)...) body...)");
+        return new IntNode(0 as i64);
+      }
+      const bindings = (list.children[1] as ListNode).children;
+      const bodyExprs = new Array<Node>();
+      for (let i = 2; i < list.children.length; i++) bodyExprs.push(list.children[i]);
+      if (bindings.length == 0) {
+        if (bodyExprs.length == 0) return new IntNode(0 as i64);
+        if (bodyExprs.length == 1) return expandNode(bodyExprs[0], env);
+        const seq = new ListNode();
+        seq.children.push(new SymbolNode("progn"));
+        for (let k = 0; k < bodyExprs.length; k++) seq.children.push(bodyExprs[k]);
+        return expandNode(seq, env);
+      }
+      // Build from inside out: innermost let wraps the body, outer lets wrap that.
+      const lastPair = bindings[bindings.length - 1] as ListNode;
+      let current = new ListNode();
+      current.children.push(new SymbolNode("let"));
+      for (let k = 0; k < lastPair.children.length; k++) current.children.push(lastPair.children[k]);
+      for (let k = 0; k < bodyExprs.length; k++) current.children.push(bodyExprs[k]);
+      for (let b = bindings.length - 2; b >= 0; b--) {
+        const pair = bindings[b] as ListNode;
+        const outer = new ListNode();
+        outer.children.push(new SymbolNode("let"));
+        for (let k = 0; k < pair.children.length; k++) outer.children.push(pair.children[k]);
+        outer.children.push(current);
+        current = outer;
+      }
+      return expandNode(current, env);
+    }
+
+    // ── (cond (test1 expr1) (test2 expr2) ... (else exprN)) ──────────────────
+    // Desugars into nested (if test expr ...) forms, right to left.
+    // The last clause may use `else` as the test — it becomes an unconditional value.
+    // Any clause with multiple body expressions is wrapped in (progn ...).
+    if (name == "cond") {
+      if (list.children.length < 2) return new IntNode(0 as i64);
+      // Build from the last clause inward.
+      let current: Node = new IntNode(0 as i64); // fallback when no else clause
+      for (let c = list.children.length - 1; c >= 1; c--) {
+        if (list.children[c].tag != TAG_LIST) {
+          env.errors.push("cond: clause " + c.toString() + " is not a list");
+          return new IntNode(0 as i64);
+        }
+        const clause = list.children[c] as ListNode;
+        if (clause.children.length < 2) {
+          env.errors.push("cond: each clause must be (test expr...)");
+          return new IntNode(0 as i64);
+        }
+        const test = clause.children[0];
+        // Build the clause body: single expr or (progn exprs...)
+        let body: Node;
+        if (clause.children.length == 2) {
+          body = clause.children[1];
+        } else {
+          const pg = new ListNode();
+          pg.children.push(new SymbolNode("progn"));
+          for (let k = 1; k < clause.children.length; k++) pg.children.push(clause.children[k]);
+          body = pg;
+        }
+        // `else` clause — becomes the unconditional fallback
+        if (test.tag == TAG_SYMBOL && (test as SymbolNode).name == "else") {
+          current = body;
+        } else {
+          const ifNode = new ListNode();
+          ifNode.children.push(new SymbolNode("if"));
+          ifNode.children.push(test);
+          ifNode.children.push(body);
+          ifNode.children.push(current);
+          current = ifNode;
+        }
+      }
+      return expandNode(current, env);
+    }
+
+    // ── (match subject (pat1 expr1) (pat2 expr2) ... (_ exprN)) ──────────────
+    // Level-1 scalar pattern matching: patterns are integer/float/char literals
+    // or `_` (wildcard, matches anything — equivalent to `else`).
+    // The subject is evaluated exactly once (bound to __match_val).
+    // Desugars into: (let __match_val subject (if (= __match_val pat1) expr1 ...))
+    if (name == "match") {
+      if (list.children.length < 3) return new IntNode(0 as i64);
+      const subject = list.children[1];
+      // Build nested ifs from the last arm inward.
+      let current: Node = new IntNode(0 as i64); // fallback when no _ arm
+      const tmpName = env.freshName("__match_val_");
+      const matchSym = new SymbolNode(tmpName);
+      for (let c = list.children.length - 1; c >= 2; c--) {
+        if (list.children[c].tag != TAG_LIST) {
+          env.errors.push("match: arm " + c.toString() + " is not a list");
+          return new IntNode(0 as i64);
+        }
+        const arm = list.children[c] as ListNode;
+        if (arm.children.length < 2) {
+          env.errors.push("match: each arm must be (pattern expr...)");
+          return new IntNode(0 as i64);
+        }
+        const pat = arm.children[0];
+        // Build arm body: single expr or (progn exprs...)
+        let body: Node;
+        if (arm.children.length == 2) {
+          body = arm.children[1];
+        } else {
+          const pg = new ListNode();
+          pg.children.push(new SymbolNode("progn"));
+          for (let k = 1; k < arm.children.length; k++) pg.children.push(arm.children[k]);
+          body = pg;
+        }
+        // `_` wildcard — unconditional fallback
+        if (pat.tag == TAG_SYMBOL && (pat as SymbolNode).name == "_") {
+          current = body;
+        } else {
+          // (= __match_val pattern)
+          const testNode = new ListNode();
+          testNode.children.push(new SymbolNode("="));
+          testNode.children.push(matchSym);
+          testNode.children.push(pat);
+          const ifNode = new ListNode();
+          ifNode.children.push(new SymbolNode("if"));
+          ifNode.children.push(testNode);
+          ifNode.children.push(body);
+          ifNode.children.push(current);
+          current = ifNode;
+        }
+      }
+      // Wrap in (let __match_val subject body) to evaluate subject once.
+      const letNode = new ListNode();
+      letNode.children.push(new SymbolNode("let"));
+      letNode.children.push(matchSym);
+      letNode.children.push(subject);
+      letNode.children.push(current);
+      return expandNode(letNode, env);
     }
   }
 
@@ -467,6 +685,151 @@ function parsePrintfFormat(fmt: string, argTypes: Array<string>, env: Env): Arra
     segments.push("L:" + ptr.toString() + ":" + litBuf.length.toString());
   }
   return segments;
+}
+
+// Build the WAT function body for a sprintf-generated function.
+// The generated function takes ($__buf i32, args...) and returns bytes written.
+// Literal segments and converted arg strings are copied into the buffer via
+// a byte-copy loop; $__pos tracks the current write offset.
+function buildSprintfFunc(fmt: string, funcName: string, env: Env): string {
+  const argTypes = new Array<string>();
+  const segments = parsePrintfFormat(fmt, argTypes, env);
+
+  let escFmt = "";
+  for (let i = 0; i < fmt.length; i++) {
+    const ch = fmt.charAt(i);
+    if (ch == "\"") escFmt += "\\\"";
+    else if (ch == "\n") escFmt += "\\n";
+    else escFmt += ch;
+  }
+
+  let wat = "  (; sprintf \"" + escFmt + "\" ;)\n  (func $" + funcName;
+  wat += " (param $__buf i32)";
+  for (let j = 0; j < argTypes.length; j++) {
+    wat += " (param $a" + j.toString() + " " + argTypes[j] + ")";
+  }
+  wat += " (result i32)\n";
+  wat += "    (local $__pos i32)\n";
+  wat += "    (local $__s_ptr i32)\n";
+  wat += "    (local $__s_len i32)\n";
+  wat += "    (local $__i i32)\n";
+
+  // Inline byte-copy helper: copies $__s_len bytes from $__s_ptr to ($__buf+$__pos)
+  // emitted as a named block+loop using WAT structured control flow.
+  const emitCopy = (): string => {
+    let s = "";
+    s += "    (local.set $__i (i32.const 0))\n";
+    s += "    (block $__cp_brk\n";
+    s += "      (loop $__cp_lp\n";
+    s += "        (br_if $__cp_brk (i32.ge_u (local.get $__i) (local.get $__s_len)))\n";
+    s += "        (i32.store8 (i32.add (i32.add (local.get $__buf) (local.get $__pos)) (local.get $__i))\n";
+    s += "                    (i32.load8_u (i32.add (local.get $__s_ptr) (local.get $__i))))\n";
+    s += "        (local.set $__i (i32.add (local.get $__i) (i32.const 1)))\n";
+    s += "        (br $__cp_lp)))\n";
+    s += "    (local.set $__pos (i32.add (local.get $__pos) (local.get $__s_len)))\n";
+    return s;
+  };
+
+  let curArg: i32 = 0;
+  for (let j = 0; j < segments.length; j++) {
+    const seg = segments[j];
+    if (seg.startsWith("L:")) {
+      const colon1 = seg.indexOf(":", 2) as i32;
+      const ptr    = i32(I64.parseInt(seg.slice(2, colon1)));
+      const len    = i32(I64.parseInt(seg.slice(colon1 + 1)));
+      wat += "    (local.set $__s_ptr (i32.const " + ptr.toString() + "))\n";
+      wat += "    (local.set $__s_len (i32.const " + len.toString() + "))\n";
+      wat += emitCopy();
+    } else if (seg == "A:i32") {
+      wat += "    (call $i32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopy();
+      curArg++;
+    } else if (seg == "A:i64") {
+      wat += "    (call $i64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopy();
+      curArg++;
+    } else if (seg == "A:str") {
+      wat += "    (local.set $__s_ptr (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len (local.get $a" + (curArg + 1).toString() + "))\n";
+      wat += emitCopy();
+      curArg += 2;
+    } else if (seg == "A:char") {
+      // Single byte — store directly then advance pos by 1
+      wat += "    (i32.store8 (i32.add (local.get $__buf) (local.get $__pos)) (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__pos (i32.add (local.get $__pos) (i32.const 1)))\n";
+      curArg++;
+    } else if (seg == "A:f32") {
+      wat += "    (call $f32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopy();
+      curArg++;
+    } else if (seg == "A:f64") {
+      wat += "    (call $f64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopy();
+      curArg++;
+    }
+  }
+  wat += "    (local.get $__pos)\n";
+  wat += "  )\n";
+  return wat;
+}
+
+// Expand a (sprintf buf "fmt" args...) call.
+// Returns (call $__sprintf_N buf arg1 arg2 ...) — result is bytes written (:i32).
+function expandSprintf(list: ListNode, env: Env): Node {
+  if (list.children.length < 3) {
+    env.errors.push("sprintf: expected (sprintf buf \"fmt\" args...)");
+    return new IntNode(0 as i64);
+  }
+  const fmtArg = list.children[2];
+  let fmtStr = "";
+  if (fmtArg.tag == TAG_STRING) {
+    fmtStr = (fmtArg as StringNode).value;
+  } else if (fmtArg.tag == TAG_SYMBOL) {
+    const sym = (fmtArg as SymbolNode).name;
+    if (sym.startsWith("__str:")) fmtStr = sym.slice(6);
+    else {
+      env.errors.push("sprintf: format must be a string literal (got '" + sym + "')");
+      return new IntNode(0 as i64);
+    }
+  } else {
+    env.errors.push("sprintf: format must be a compile-time string literal");
+    return new IntNode(0 as i64);
+  }
+
+  // Use a separate name registry for sprintf to avoid collisions with printf funcs.
+  const cacheKey = "__sprintf:" + fmtStr;
+  let funcName = "";
+  if (env.printfFuncsByFmt.has(cacheKey)) {
+    funcName = env.printfFuncsByFmt.get(cacheKey);
+  } else {
+    const probeTypes = printfArgTypes(fmtStr);
+    const typeSig = probeTypes.length > 0 ? probeTypes.join("_") : "str";
+    const baseName = "__sprintf_" + typeSig;
+    const count = env.printfNameCounts.has(baseName) ? env.printfNameCounts.get(baseName) : 0;
+    env.printfNameCounts.set(baseName, count + 1);
+    funcName = count == 0 ? baseName : baseName + "_" + (count + 1).toString();
+    env.printfFuncsByFmt.set(cacheKey, funcName);
+    const body = buildSprintfFunc(fmtStr, funcName, env);
+    env.funcBodies.set(funcName, body);
+    env.funcNames.push(funcName);
+  }
+
+  // (call $__sprintf_N buf arg1 arg2 ...)
+  const callNode = new ListNode();
+  callNode.children.push(new SymbolNode(funcName));
+  callNode.children.push(expandNode(list.children[1], env)); // buf
+  for (let i = 3; i < list.children.length; i++) {
+    callNode.children.push(expandNode(list.children[i], env));
+  }
+  return callNode;
 }
 
 // Build the WAT function body for a printf-generated function.
@@ -695,12 +1058,19 @@ export function expandAll(forms: Array<Node>, env: Env): Array<ExpandedForm> {
     }
 
     // ── (defconst name val) — compile-time named constant ─────────────────
-    // Sugar for a zero-param macro: (defconst FOO 42) makes (FOO) expand to 42.
+    // Folds the value to a compile-time literal (IntNode/FloatNode).
     if (headName == "defconst") {
       // children: [defconst, name, val]
       const constName = (list.children[1] as SymbolNode).name;
-      const constVal  = list.children[2];
-      env.macros.set(constName, new MacroInfo(new Array<string>(), "", constVal));
+      const rawVal    = list.children[2];
+      const prevErrs  = env.errors.length;
+      const folded    = constFold(rawVal, env);
+      if (folded != null) {
+        env.macros.set(constName, new MacroInfo(new Array<string>(), "", folded));
+      } else if (env.errors.length == prevErrs) {
+        // constFold returned null without a specific error → generic message.
+        env.errors.push("defconst " + constName + ": value must be a compile-time constant (literal or arithmetic on known defconst names)");
+      }
       continue;
     }
     // ── (defvar name [:Type] val) — mutable global variable ──────────────────

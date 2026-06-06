@@ -4,12 +4,12 @@
 (include io)
 
 (defn main ()
-  (let buf     :ptr (alloc 256)
-    (let running :i32 1
-      (while running
-        (let line :str (read-line STDIN buf 256)
-          (if (string-eq line "quit")
-            (set! running 0)
-            (let _d :i32 0
-              (print-string line)
-              (print "\n"))))))))
+  (let* ((buf     :ptr (alloc 256))
+         (running :i32 1))
+    (while running
+      (let line :str (read-line STDIN buf 256)
+        (if (string-eq line "quit")
+          (set! running 0)
+          (let _d :i32 0
+            (print-string line)
+            (print "\n")))))))

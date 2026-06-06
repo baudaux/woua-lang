@@ -22,25 +22,25 @@
 
 ;; Bit-reversal of an n-bit integer (using /2 and *2 instead of shift operators).
 (defn bit-reverse (x :i32 bits :i32) :i32
-  (let r :i32 0
-    (let i :i32 0
-      (while (< i bits)
-        (set! r (or (* r 2) (and x 1)))
-        (set! x (/ x 2))
-        (set! i (+ i 1)))
-      r)))
+  (let* ((r :i32 0)
+         (i :i32 0))
+    (while (< i bits)
+      (set! r (| (* r 2) (& x 1)))
+      (set! x (/ x 2))
+      (set! i (+ i 1)))
+    r))
 
 ;; Bit-reverse permutation in place on re[] and im[].
 (defn fft-permute (re :ptr im :ptr n :i32 log2n :i32) :void
   (for pi 0 n
     (let pj :i32 (bit-reverse pi log2n)
       (if (< pi pj)
-        (let tr :f64 (f64-get re pi)
-          (let ti :f64 (f64-get im pi)
-            (f64-set re pi (f64-get re pj))
-            (f64-set im pi (f64-get im pj))
-            (f64-set re pj tr)
-            (f64-set im pj ti)))))))
+        (let* ((tr :f64 (f64-get re pi))
+               (ti :f64 (f64-get im pi)))
+          (f64-set re pi (f64-get re pj))
+          (f64-set im pi (f64-get im pj))
+          (f64-set re pj tr)
+          (f64-set im pj ti))))))
 
 ;; One butterfly stage: mmax is the current sub-DFT length (2, 4, 8, ..., N).
 (defn fft-stage (re :ptr im :ptr n :i32 mmax :i32) :void
@@ -81,27 +81,27 @@
 
 (defn main () :void
   (drop (memory-grow 2))
-  (let re :ptr (alloc FFT-BYTES)
-    (let im :ptr (alloc FFT-BYTES)
-      ;; Initialise: impulse at index 0 (re[0]=1, all others 0)
-      (for fi 0 FFT-N
-        (f64-set re fi 0.0f64)
-        (f64-set im fi 0.0f64))
-      (f64-set re 0 1.0f64)
-      ;; Time FFT-REPS runs
-      (let start :i64 (time-now-ns)
-        (for rep 0 FFT-REPS
-          (fft re im FFT-N FFT-LOG2N)
-          ;; Re-initialise for the next rep (re-use same buffers)
-          (for fi 0 FFT-N
-            (f64-set re fi 0.0f64)
-            (f64-set im fi 0.0f64))
-          (f64-set re 0 1.0f64))
-        (let elapsed :i64 (- (time-now-ns) start)
-          ;; Run one final FFT whose output we check
-          (fft re im FFT-N FFT-LOG2N)
-          ;; Impulse FFT → all output bins = 1+0i; check re[1] ≈ 1
-(printf "fft N=%d reps=%d in %ld ms, re[1]=%ld (expect 1)\n"
-            FFT_N FFT_REPS
-            (/ elapsed 1000000i64)
-            (as :i64 (round (f64-get re 1)))))))))
+  (let* ((re :ptr (alloc FFT-BYTES))
+         (im :ptr (alloc FFT-BYTES)))
+    ;; Initialise: impulse at index 0 (re[0]=1, all others 0)
+    (for fi 0 FFT-N
+      (f64-set re fi 0.0f64)
+      (f64-set im fi 0.0f64))
+    (f64-set re 0 1.0f64)
+    ;; Time FFT-REPS runs
+    (let start :i64 (time-now-ns)
+      (for rep 0 FFT-REPS
+        (fft re im FFT-N FFT-LOG2N)
+        ;; Re-initialise for the next rep (re-use same buffers)
+        (for fi 0 FFT-N
+          (f64-set re fi 0.0f64)
+          (f64-set im fi 0.0f64))
+        (f64-set re 0 1.0f64))
+      (let elapsed :i64 (- (time-now-ns) start)
+        ;; Run one final FFT whose output we check
+        (fft re im FFT-N FFT-LOG2N)
+        ;; Impulse FFT → all output bins = 1+0i; check re[1] ≈ 1
+        (printf "fft N=%d reps=%d in %ld ms, re[1]=%ld (expect 1)\n"
+          FFT-N FFT-REPS
+          (/ elapsed 1000000i64)
+          (as :i64 (round (f64-get re 1))))))))

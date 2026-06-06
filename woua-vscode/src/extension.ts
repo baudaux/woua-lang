@@ -46,11 +46,18 @@ function parseErrors(stderr: string, document: vscode.TextDocument): vscode.Diag
       continue;
     }
 
-    // Fallback: generic "wouac: <message>" with no location — squiggle line 0
+    // Fallback: generic "wouac: <message>" with no location — squiggle the
+    // first non-comment, non-empty line so the squiggle doesn't land on a
+    // leading comment block.
     const generic = line.match(/^wouac:\s*(.+)$/);
     if (generic) {
-      const msg   = generic[1].trim();
-      const range = new vscode.Range(0, 0, 0, document.lineAt(0).text.length);
+      const msg = generic[1].trim();
+      let fallbackLine = 0;
+      for (let i = 0; i < document.lineCount; i++) {
+        const t = document.lineAt(i).text.trim();
+        if (t.length > 0 && !t.startsWith(";;")) { fallbackLine = i; break; }
+      }
+      const range = new vscode.Range(fallbackLine, 0, fallbackLine, document.lineAt(fallbackLine).text.length);
       diags.push(new vscode.Diagnostic(range, msg, vscode.DiagnosticSeverity.Error));
     }
   }

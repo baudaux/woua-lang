@@ -43,23 +43,23 @@
   (__svg-str buf "\" d=\"")
   (let i :i32 0
     (while (<= i SEGS)
-      (let xi :i32 (/ (* i W) SEGS)
-        (let theta :f32 (+ phase (* TWO-PI (* FREQ (/ (as :f32 i) (as :f32 SEGS)))))
-          (let yi :i32 (as :i32 (round (- cy (* ampl (sin theta)))))
-            (if (= i 0)
-              (__svg-str buf "M ")
-              (__svg-str buf " L "))
-            (__svg-int buf xi)
-            (__svg-byte buf 44)     ;; ','
-            (__svg-int buf yi))))
+      (let* ((xi    :i32 (/ (* i W) SEGS))
+             (theta :f32 (+ phase (* TWO-PI (* FREQ (/ (as :f32 i) (as :f32 SEGS))))))
+             (yi    :i32 (as :i32 (round (- cy (* ampl (sin theta)))))))
+        (if (= i 0)
+          (__svg-str buf "M ")
+          (__svg-str buf " L "))
+        (__svg-int buf xi)
+        (__svg-byte buf 44)     ;; ','
+        (__svg-int buf yi))
       (set! i (+ i 1))))
   (__svg-str buf "\" fill=\"none\" stroke=\"")
   (__svg-str buf color)
   (__svg-str buf "\" stroke-width=\"3\"/>\n"))
 
 (defn main ()
-  (let svg-fd :i32 (open-file "/dev/svg" 0)
-    (let buf :*SvgBuf (svg-buf-new 8192)
+  (let* ((svg-fd :i32    (open-file "/dev/svg" 0))
+         (buf    :*SvgBuf (svg-buf-new 8192)))
 
       ;; ── Root <svg> attributes ──────────────────────────────────────────
       (svg-root-attr buf "width"   (i32->str W))
@@ -90,4 +90,4 @@
           ;; Advance phase; wrap at 2π to prevent float drift over time
           (set! phi (+ phi DPHI))
           (if (>= phi TWO-PI)
-            (set! phi (- phi TWO-PI))))))))
+            (set! phi (- phi TWO-PI)))))))

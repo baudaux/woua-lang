@@ -1,0 +1,42 @@
+;; @test defconst constant folding
+;; @feature arithmetic in (defconst ...) is evaluated at compile time;
+;;   references to previously-defined defconst names are resolved;
+;;   supports +, -, *, /, %, <<, >>, and, or, xor for :i32/:i64
+;;   and +, -, *, / for :f32/:f64
+;; @expect
+;;   NSAMPLES=40960
+;;   FFT-BYTES=32768
+;;   MASK=255
+;;   SHIFTED=64
+;;   DIFF=10
+;;   SCALE=500
+
+(include io)
+
+(defconst N        4096)
+(defconst REPS     10)
+(defconst NSAMPLES (* REPS N))           ;; 10 * 4096 = 40960
+
+(defconst FFT-N    4096)
+(defconst FFT-BYTES (* FFT-N 8))         ;; 4096 * 8 = 32768
+
+(defconst BYTE-MASK (and 511 255))       ;; 511 & 255 = 255
+(defconst MASK BYTE-MASK)                ;; reference to a defconst
+
+(defconst SHIFTED (<< 1 6))              ;; 1 << 6 = 64
+
+(defconst A    20)
+(defconst B    10)
+(defconst DIFF (- A B))                  ;; 20 - 10 = 10
+
+(defconst SCALE-F 1000.0)
+(defconst SCALE-G 0.5)
+(defconst SCALE (* SCALE-F SCALE-G))     ;; 1000.0 * 0.5 = 500.0 (f32)
+
+(defn main () :void
+  (printf "NSAMPLES=%d\n"  NSAMPLES)
+  (printf "FFT-BYTES=%d\n" FFT-BYTES)
+  (printf "MASK=%d\n"      MASK)
+  (printf "SHIFTED=%d\n"   SHIFTED)
+  (printf "DIFF=%d\n"      DIFF)
+  (printf "SCALE=%d\n"     (as :i32 SCALE)))

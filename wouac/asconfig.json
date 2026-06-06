@@ -15,6 +15,7 @@
     }
   },
   "options": {
+    "stackSize": 1048576,
     "lib":     "./node_modules/@assemblyscript/wasi-shim/assembly",
     "use":     [
       "ASC_WASI=1",

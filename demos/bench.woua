@@ -7,10 +7,10 @@
 (include time)
 
 (defn main () :void
-  (let start :i64 (time-now-ms)
-    (let i :i32 0
-      (while (< i 10000000)
-        (set! i (+ i 1)))
-      (let elapsed :i64 (time-elapsed-ms start)
-        (printf "counted to %d in " i)
-        (printf "%d ms\n" (as :i32 elapsed))))))
+  (let* ((start :i64 (time-now-ms))
+         (i     :i32 0))
+    (while (< i 10000000)
+      (set! i (+ i 1)))
+    (let elapsed :i64 (time-elapsed-ms start)
+      (printf "counted to %d in " i)
+      (printf "%d ms\n" (as :i32 elapsed)))))

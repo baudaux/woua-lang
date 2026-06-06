@@ -84,6 +84,9 @@
 ;; Allocate the next empty slot for an inline struct, advance len, return :*T.
 ;; No bounds check.
 (defmacro array-slot (T arr)
+
+
+
   (let __idx :i32 (Array/len arr)
     (Array/len! arr (+ __idx 1))
     (+ (Array/ptr arr) (* __idx (sizeof T)))))
@@ -107,3 +110,20 @@
   (progn
     (assert (> (Array/len arr) 0) "array-pop-slot!: array is empty")
     (array-pop-slot T arr)))
+
+;; ─── Typed slice (fat-pointer) helpers ───────────────────────────────────────
+;; These operate on locals declared as :T[] or :T[N].
+;; The unchecked aref/aset!/alen are built into the compiler; only the
+;; bounds-checked variants are macros (they need assert and alen).
+
+;; Bounds-checked element read: asserts 0 <= idx < (alen buf) then calls aref.
+(defmacro aref! (buf idx)
+  (progn
+    (assert (and (>= idx 0) (< idx (alen buf))) "aref!: index out of bounds")
+    (aref buf idx)))
+
+;; Bounds-checked element write: asserts 0 <= idx < (alen buf) then calls aset!.
+(defmacro aset!! (buf idx val)
+  (progn
+    (assert (and (>= idx 0) (< idx (alen buf))) "aset!!: index out of bounds")
+    (aset! buf idx val)))

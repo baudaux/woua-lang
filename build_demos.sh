@@ -22,13 +22,8 @@ for src in "$DEMOS"/*.woua; do
   wasm_file="$OUT/$name.wasm"
 
   echo "── $name ──────────────────────────────────────"
-  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel"); then
+  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" -wasm); then
     echo "FAIL  $name  (compile error)"
-    FAIL=$((FAIL + 1))
-    continue
-  fi
-  if ! wat2wasm --enable-threads "$wat_file" -o "$wasm_file"; then
-    echo "FAIL  $name  (wat2wasm error)"
     FAIL=$((FAIL + 1))
     continue
   fi

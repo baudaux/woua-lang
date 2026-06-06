@@ -1,0 +1,38 @@
+;; Test: arena stack — push/pop scoped allocations, alloc-reset
+(include io)
+(include memory)
+
+(defn main () :i32
+  ;; Capture baseline heap address before any allocations
+  (let base :i32 heap-ptr
+
+    ;; --- Test 1: arena-push / arena-pop frees allocations ---
+    (arena-push)
+    (let a :i32[4])   ;; allocates 16 bytes inside the arena
+    (aset! a 0 42)
+    (assert (= (aref a 0) 42) "aref after aset")
+    (let mid :i32 heap-ptr)
+    (assert (> mid base) "heap grew after alloc")
+    (arena-pop)
+    (assert (= heap-ptr base) "arena-pop restored heap-ptr")
+
+    ;; --- Test 2: nested arenas ---
+    (arena-push)
+    (let b :i32[4])
+    (let after-b :i32 heap-ptr)
+    (arena-push)
+    (let c :i32[4])
+    (assert (> heap-ptr after-b) "nested alloc above outer")
+    (arena-pop)
+    (assert (= heap-ptr after-b) "inner pop restores to outer level")
+    (arena-pop)
+    (assert (= heap-ptr base) "outer pop restores to baseline")
+
+    ;; --- Test 3: alloc-reset ---
+    (let d :i32[16])  ;; allocate outside any arena
+    (assert (> heap-ptr base) "alloc moved heap-ptr")
+    (alloc-reset)
+    (assert (= heap-ptr base) "alloc-reset cleared heap")
+    (assert (= arena-depth 0) "alloc-reset cleared depth")
+
+    0))

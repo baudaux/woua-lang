@@ -1,0 +1,30 @@
+;; @test cond
+;; @feature (cond (test expr)... (else expr)) multi-branch conditional
+;; @expect
+;;   zero
+;;   positive
+;;   negative
+;;   other
+(include io)
+
+(defn classify (x :i32) :void
+  (printf "%s\n"
+    (cond
+      ((= x 0)  "zero")
+      ((> x 0)  "positive")
+      ((< x 0)  "negative")
+      (else     "other"))))
+
+(defn main () :i32
+  (classify 0)
+  (classify 5)
+  (classify -3)
+  ;; no-else path returns 0 (fallback) — just check it doesn't crash
+  (let r :i32
+    (cond
+      ((= 1 2) 99)
+      ((= 2 2) 42)))
+  (assert (= r 42) "cond no-else match")
+  (printf "%s\n"
+    (cond ((= 1 2) "nope") (else "other")))
+  0)

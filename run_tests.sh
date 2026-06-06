@@ -33,15 +33,9 @@ for src in "$TESTS"/*.woua; do
     wat_rel="tests/out/$name.wat"
     wasm_file="$OUT/$name.wasm"
     map_file="$OUT/$name.wat.map"
-    vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel -map"
-    if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" -map 2>/dev/null); then
+    vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel -map -wasm"
+    if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" -map -wasm 2>/dev/null); then
       echo "FAIL  $name  (compile error)"
-      FAIL=$((FAIL + 1))
-      continue
-    fi
-    vcmd "wat2wasm --enable-threads $wat_rel -o $wasm_file"
-    if ! wat2wasm --enable-threads "$OUT/$name.wat" -o "$wasm_file" 2>/dev/null; then
-      echo "FAIL  $name  (wat2wasm error)"
       FAIL=$((FAIL + 1))
       continue
     fi
@@ -97,9 +91,7 @@ for src in "$TESTS"/*.woua; do
     src_rel="tests/$name.woua"
     err_wat="tests/out/$name.wat"
     vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $err_wat"
-    vcmd "wat2wasm --enable-threads $err_wat -o tests/out/$name.wasm"
-    if (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$err_wat" 2>/dev/null) \
-        && wat2wasm --enable-threads "$OUT/$name.wat" -o "$OUT/$name.wasm" 2>/dev/null; then
+    if (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$err_wat" 2>/dev/null); then
       echo "FAIL  $name  (expected compile error, but compiled successfully)"
       FAIL=$((FAIL + 1))
     else
@@ -131,17 +123,27 @@ for src in "$TESTS"/*.woua; do
   wat_file="$OUT/$name.wat"
   wasm_file="$OUT/$name.wasm"
   src_rel="tests/$name.woua"
-  vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel"
-  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" 2>/dev/null); then
+  vcmd "wasmtime --dir=. wouac/dist/wouac.wasm $src_rel -o $wat_rel -wasm"
+  if ! (cd "$REPO" && wasmtime --dir=. "$WOUAC" "$src_rel" -o "$wat_rel" -wasm 2>/dev/null); then
     echo "FAIL  $name  (compile error)"
     FAIL=$((FAIL + 1))
     continue
   fi
-  vcmd "wat2wasm --enable-threads $wat_file -o $wasm_file"
-  if ! wat2wasm --enable-threads "$wat_file" -o "$wasm_file" 2>/dev/null; then
-    echo "FAIL  $name  (wat2wasm error)"
-    FAIL=$((FAIL + 1))
-    continue
+
+  # Check inline @expect-wat patterns (can coexist with @expect runtime check)
+  if grep -q '^;; @expect-wat' "$src"; then
+    wat_ok=1
+    while IFS= read -r line; do
+      pattern="${line#;; @expect-wat }"
+      if ! grep -qF "$pattern" "$wat_file"; then
+        echo "FAIL  $name  (WAT missing: $pattern)"
+        wat_ok=0
+      fi
+    done < <(grep '^;; @expect-wat ' "$src")
+    if [ "$wat_ok" -eq 0 ]; then
+      FAIL=$((FAIL + 1))
+      continue
+    fi
   fi
 
   # Parse optional @args annotation for passing extra arguments to the wasm

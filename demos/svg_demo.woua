@@ -27,8 +27,8 @@
 (defconst FRAME-NS 33000000)
 
 (defn main ()
-  (let svg-fd :i32 (open-file "/dev/svg" 0)
-    (let buf :*SvgBuf (svg-buf-new 4096)
+  (let* ((svg-fd :i32    (open-file "/dev/svg" 0))
+         (buf    :*SvgBuf (svg-buf-new 4096)))
 
     ;; ── Root <svg> attributes ─────────────────────────────────────────────
     (svg-root-attr buf "width"   (i32->str CANVAS-W))
@@ -62,39 +62,39 @@
     (svg-flush-to buf svg-fd)
 
     ;; Animation loop: bounce the ball horizontally and vertically (infinite)
-    (let bx    :i32 50
-      (let by    :i32 220
-        (let dx    :i32 4
-          (let dy    :i32 -3
-            (while 1
+    (let* ((bx :i32 50)
+           (by :i32 220)
+           (dx :i32 4)
+           (dy :i32 -3))
+      (while 1
 
-                ;; Passive sleep for one frame duration
-                (poll-sleep-ns (as :i64 FRAME-NS))
+          ;; Passive sleep for one frame duration
+          (poll-sleep-ns (as :i64 FRAME-NS))
 
-                ;; Update position
-                (set! bx (+ bx dx))
-                (set! by (+ by dy))
+          ;; Update position
+          (set! bx (+ bx dx))
+          (set! by (+ by dy))
 
-                ;; Bounce off walls
-                (if (>= bx (- CANVAS-W BALL-R))
-                  (let _d :i32 0
-                    (set! bx (- CANVAS-W BALL-R))
-                    (set! dx (- 0 dx))))
-                (if (< bx BALL-R)
-                  (let _d :i32 0
-                    (set! bx BALL-R)
-                    (set! dx (- 0 dx))))
+          ;; Bounce off walls
+          (if (>= bx (- CANVAS-W BALL-R))
+            (let _d :i32 0
+              (set! bx (- CANVAS-W BALL-R))
+              (set! dx (- 0 dx))))
+          (if (< bx BALL-R)
+            (let _d :i32 0
+              (set! bx BALL-R)
+              (set! dx (- 0 dx))))
 
-                ;; Bounce off ground and ceiling
-                (if (>= by (- 240 BALL-R))
-                  (let _d :i32 0
-                    (set! by (- 240 BALL-R))
-                    (set! dy (- 0 dy))))
-                (if (< by BALL-R)
-                  (let _d :i32 0
-                    (set! by BALL-R)
-                    (set! dy (- 0 dy))))
+          ;; Bounce off ground and ceiling
+          (if (>= by (- 240 BALL-R))
+            (let _d :i32 0
+              (set! by (- 240 BALL-R))
+              (set! dy (- 0 dy))))
+          (if (< by BALL-R)
+            (let _d :i32 0
+              (set! by BALL-R)
+              (set! dy (- 0 dy))))
 
-                ;; Re-emit the ball with updated position (upsert by id)
-                (svg-circle buf "ball" bx by BALL-R "#FF4500")
-                (svg-flush-to buf svg-fd)))))))))
+          ;; Re-emit the ball with updated position (upsert by id)
+          (svg-circle buf "ball" bx by BALL-R "#FF4500")
+          (svg-flush-to buf svg-fd)))))

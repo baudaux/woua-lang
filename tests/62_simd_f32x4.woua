@@ -9,25 +9,21 @@
 (include simd)
 
 (defn test-splat-mul () :void
-  (let s :f32x4 (f32x4-splat 2.0)
-    (let v :f32x4 1.0:2.0:3.0:4.0f32x4
-      (let m :f32x4 (* v s)
-        (printf "splat: %f %f %f %f\n"
-          (extract_lane 0 s)
-          (extract_lane 1 s)
-          (extract_lane 2 s)
-          (extract_lane 3 s))
-        (printf "mul: %f %f %f %f\n"
-          (extract_lane 0 m)
-          (extract_lane 1 m)
-          (extract_lane 2 m)
-          (extract_lane 3 m))))))
+  (let* ((s :f32x4 (f32x4-splat 2.0))
+         (v :f32x4 1.0:2.0:3.0:4.0f32x4)
+         (m :f32x4 (* v s)))
+    (printf "splat: %f %f %f %f\n"
+      (extract_lane 0 s) (extract_lane 1 s)
+      (extract_lane 2 s) (extract_lane 3 s))
+    (printf "mul: %f %f %f %f\n"
+      (extract_lane 0 m) (extract_lane 1 m)
+      (extract_lane 2 m) (extract_lane 3 m))))
 
 (defn test-dot () :void
-  (let v :f32x4 1.0:2.0:3.0:4.0f32x4
-    (let ones :f32x4 (f32x4-splat 1.0)
-      (printf "dot: %f\n"
-        (f32x4.dot-product v ones)))))
+  (let* ((v :f32x4 1.0:2.0:3.0:4.0f32x4)
+         (ones :f32x4 (f32x4-splat 1.0)))
+    (printf "dot: %f\n"
+      (f32x4.dot-product v ones))))
 
 (defn main () :void
   (test-splat-mul)

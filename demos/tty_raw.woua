@@ -10,42 +10,41 @@
 (include wasix)
 
 (defn main () :void
-  (let orig :*Tty (alloc (sizeof Tty))
-    (let raw  :*Tty (alloc (sizeof Tty))
-      ;; Save original TTY state
-      (let ge :i32 (tty-get orig)
-        (if (not (= ge 0))
-          (progn
-            (printf "tty_get failed: %d\n" ge)
-            (proc_exit 1))
-          (progn
-            ;; Copy original into raw, then disable echo and line buffering
-            (drop (tty-get raw))
-            (Tty/echo!          raw 0)
-            (Tty/line_buffered! raw 0)
-            (drop (tty-set raw))
+  (let* ((orig :*Tty (alloc (sizeof Tty)))
+         (raw  :*Tty (alloc (sizeof Tty)))
+         (ge   :i32  (tty-get orig)))
+    (if (not (= ge 0))
+      (progn
+        (printf "tty_get failed: %d\n" ge)
+        (proc_exit 1))
+      (progn
+        ;; Copy original into raw, then disable echo and line buffering
+        (drop (tty-get raw))
+        (Tty/echo!          raw 0)
+        (Tty/line_buffered! raw 0)
+        (drop (tty-set raw))
 
-            ;; Allocate a 1-byte read buffer + iovec
-            (let buf      :ptr (alloc 4)
-              (let iov      :*Iovec (alloc (+ (sizeof Iovec) 4))
-                (let nread_ptr :i32 (+ (as :i32 iov) (sizeof Iovec))
-                  (Iovec/base! iov buf)
-                  (Iovec/len!  iov 1)
-                  (printf "Terminal: %d cols x %d rows\r\n" (Tty/cols orig) (Tty/rows orig))
-                  (printf "Press keys (q to quit):\r\n")
-                  (let stop :i32 0
-                    (while (= stop 0)
-                      (drop (fd_read STDIN (as :i32 iov) 1 nread_ptr))
-                      (let nr :i32 (i32.load nread_ptr)
-                        (if (> nr 0)
-                          (let ch :u8 (i32.load8_u buf)
-                            (if (= ch 'q')
-                              (progn
-                                (printf "key: %d (%c)\r\n" ch ch)
-                                (set! stop 1))
-                              (progn
-                                (printf "key: %d (%c)\r\n" ch ch)))))))))))
+        ;; Allocate a 1-byte read buffer + iovec
+        (let* ((buf       :ptr    (alloc 4))
+               (iov       :*Iovec (alloc (+ (sizeof Iovec) 4)))
+               (nread_ptr :i32    (+ (as :i32 iov) (sizeof Iovec))))
+          (Iovec/base! iov buf)
+          (Iovec/len!  iov 1)
+          (printf "Terminal: %d cols x %d rows\r\n" (Tty/cols orig) (Tty/rows orig))
+          (printf "Press keys (q to quit):\r\n")
+          (let stop :i32 0
+            (while (= stop 0)
+              (drop (fd_read STDIN (as :i32 iov) 1 nread_ptr))
+              (let nr :i32 (i32.load nread_ptr)
+                (if (> nr 0)
+                  (let ch :u8 (i32.load8_u buf)
+                    (if (= ch 'q')
+                      (progn
+                        (printf "key: %d (%c)\r\n" ch ch)
+                        (set! stop 1))
+                      (progn
+                        (printf "key: %d (%c)\r\n" ch ch)))))))))
 
-            ;; Restore original TTY
-            (drop (tty-set orig))
-            (printf "bye\n")))))))
+        ;; Restore original TTY
+        (drop (tty-set orig))
+        (printf "bye\n")))))

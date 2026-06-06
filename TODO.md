@@ -32,12 +32,12 @@
 - [x] #44 Escape sequences in string literals — basic escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\0`) are handled in `readLiteral` in the reader; the only missing escape is `\xNN` (arbitrary hex byte); add two-digit hex parsing after the `\x` prefix in the `readLiteral` escape dispatcher in `reader.ts`
 - [x] #45 `path_open` and preopens in `lib/wasi_p1.woua` — WASI sandboxes file system access via preopened directory fds; before any `path_open` call the program must enumerate them with `fd_prestat_get` / `fd_prestat_dir_name` (scanning fds starting at 3 until `EBADF`); add the missing `defimport` declarations (`fd_prestat_get`, `fd_prestat_dir_name`, `path_open`, `path_create_directory`, `path_unlink_file`, `path_rename`) to `lib/wasi_p1.woua`; add a `(find-preopen dir-name buf)` helper macro that iterates preopened fds and returns the fd whose name matches; add a `(open-file preopen-fd path flags oflags)` convenience wrapper around `path_open`; add a demo program in `demos/` that opens and reads a file passed on the command line
 - [x] #43 Refactor `:str` — currently `:str` is treated as a bare `i32` (raw pointer) throughout the compiler; replace it with a first-class fat-pointer type `(ptr :i32, len :i32)` stored as two WAT locals or a two-value tuple; string literals should produce a `:str` value (ptr + len) rather than just a raw ptr; `printf %s` and `write` should accept `:str` directly; `(static-ptr msg)` / `(static-len msg)` become derived accessors on `:str`; `watType` should expand `:str` to two WAT values `i32 i32` in function signatures; this is a prerequisite for #08 (sprintf), #23 (static str structs), and any future string-manipulation library
-- [ ] #08 `sprintf` — like `printf` but writes into a `str` buffer instead of stdout; enables building strings at runtime
+- [x] #08 `sprintf` — like `printf` but writes into a `str` buffer instead of stdout; enables building strings at runtime
 - [x] #09 Numeric conversions — superseded by `(as :Type expr)` which handles all i32↔i64↔f32↔f64 casts with a single unified form (test 11)
 - [ ] #10 `%x` / `%X` in `printf` — hexadecimal output specifier in `lib/io.woua`
 - [x] #65 `%f` / `%lf` in `printf` — float formatting specifiers; requires a runtime f32/f64→string conversion (e.g. Grisu or ryu-style) since WASM has no built-in float-to-decimal; `%f` → `:f32`, `%lf` → `:f64`
 - [x] #11 `printf` generated functions
-- [ ] #12 Tail call optimization — emit `return_call` / `return_call_indirect` WAT instructions for self-tail-calls and mutual tail-calls; mandatory for recursive woua code to be safe at depth (the current `printf-impl` is already a recursive macro, but user `defn` functions risk stack overflow without TCO)
+- [x] #12 Tail call optimization — emit `return_call` / `return_call_indirect` WAT instructions for self-tail-calls and mutual tail-calls; mandatory for recursive woua code to be safe at depth (the current `printf-impl` is already a recursive macro, but user `defn` functions risk stack overflow without TCO)
 - [x] #13 Operator overloading for user-defined types — allow `defop` to reference a `defn` name instead of a WAT opcode; e.g. `(defop + "Point_add" (:Point :Point) :Point)` dispatches to `(call $Point_add ...)`; `resolveOp` already handles multiple overloads per operator, only the codegen emit path needs extending
 - [x] #59 `lib/wasix.woua` — WASIX extension library with at least two helpers:
   - `tty_get` — wraps the `wasix:tty/get` syscall to retrieve the current TTY settings (rows, cols, stdin/stdout isatty flags) into a struct
@@ -54,16 +54,49 @@
   - Compiler maintains a WAT `(table funcref)` and assigns an index to each referenced function
 - [x] #15 `progn` — sequence form: `(progn e1 e2 ... en)` without dummy `let _d` workaround
 - [ ] #16 `when` / `unless` — single-branch conditionals with implicit body sequence
-- [ ] #17 `cond` — multi-branch conditional: `(cond ((test) expr) ... (else expr))`
-- [ ] #18 `let*` — sequential bindings in one block: `(let* ((a 1) (b (+ a 1))) ...)` instead of deeply nested `let`
+- [x] #17 `cond` — multi-branch conditional: `(cond ((test) expr) ... (else expr))`
+- [x] #18 `let*` — sequential bindings in one block: `(let* ((a 1) (b (+ a 1))) ...)` instead of deeply nested `let`
 - [ ] #19 `min` / `max` — macros in `lib/core.woua` using `if` + a temp local to avoid double evaluation
-- [ ] #20 `mod` / `rem` operators — `i32.rem_s` / `i32.rem_u` missing from `lib/core.woua`
+- [x] #20 `mod` / `rem` operators — `i32.rem_s` / `i32.rem_u` missing from `lib/core.woua`
 - [ ] #21 Unsigned arithmetic — `div_u`, `rem_u`, `lt_u`, `shr_u` variants in `lib/core.woua` for treating i32/i64 as unsigned
 - [x] #22 `defconst` — named compile-time integer constant: `(defconst MAX_LEN 256)`
+- [x] #69 `defconst` constant folding — arithmetic expressions in `defconst` bodies should be evaluated at compile time rather than emitted as runtime instructions; e.g. `(defconst FFT-BYTES (* FFT-N 8))` should resolve to `32768` in the compiled output; requires a compile-time evaluator (`constEval`) that handles `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `and`, `or`, `xor` over literals and previously-defined `defconst` names; supported types: `:i32`, `:i64`, `:f32`, `:f64` (type inferred from the operands); the result should be stored as a typed constant in `env.consts` so all use sites inline the folded value; operands that are not literals or known `defconst` names should be a hard compile error rather than silently falling back to runtime evaluation
 - [x] #23 Static strings as `str` structs — `(defstatic name :str "text")` stores an 8-byte `{base:i32, len:i32}` header followed by the raw bytes in the data section; `(static-ref name)` returns the header address (a `:str` pointer in linear memory); `(static-ptr name)` / `(static-len name)` kept for backward compatibility
 - [x] #24 Bitwise operators in `lib/core.woua`: `band`, `bor`, `bxor`, `bnot`, `shl`, `shr`
 - [ ] #48 Dynamic `:str` allocation — consistent in-memory `{base:i32, len:i32}` layout for runtime-built strings; add `(str-alloc maxlen)` → i32 pointer to a zeroed header+buffer in the heap; add `(str-set-ptr s ptr)` / `(str-set-len s len)` setters; `(str/ptr s)` / `(str/len s)` getters already work via the fat-pointer accessors; this makes static `(defstatic name :str "text")` and dynamic heap strings share the same representation, enabling arrays of `:str`, return by pointer, and eventually a string-builder API
 - [x] #25 Arrays — `Array` type as a `(ptr, len, capacity)` struct with index-get/set macros and optional bounds checking
+- [ ] #70 Typed array / slice syntax — `:T[]` as a fat-pointer slice `{ptr, len}` and `:T[N]` as a fixed allocation; the element type and length are declared once and never repeated at call sites
+  - **Storage follows the same `:T` / `:*T` convention as structs (#27)**:
+    - `:T[N]` / `:T[]` — fat pointer `{ptr: i32, len: i32}` held in **two WAT locals**; used for local variables and function parameters; like `:str` which already works this way
+    - `:*T[N]` / `:*T[]` — the `{ptr, len}` header lives in **linear memory**; the variable holds a single `i32` pointing to it; used for struct fields, arrays-of-slices, and heap-allocated slice headers
+  - **`:T[]` — slice (fat pointer in locals)**: two WAT values `(i32, i32)`; `sizeOf` = 8; element type `T` drives load/store selection; like `:str`
+  - **`:T[N]` — allocation shorthand (locals)**: `(let buf :i32[16] ...)` expands to a `:i32[]` slice `{alloc(16 * sizeof(:i32)), 16}` in two WAT locals; `N` may be a literal, `defconst`, or runtime expression
+  - **`:*T[]` — slice header in memory**: `sizeOf` = 4 (one `i32` pointer); the pointed-to header is 8 bytes in the heap; used in `deftype` fields and struct arrays: `(deftype Foo (items :*i32[]) ...)`
+  - **`:*T[N]` — heap-allocated slice**: `(let buf :*i32[16] ...)` allocates both the element buffer and the 8-byte `{ptr, len}` header in linear memory; `buf` is an `i32` pointer to the header
+  - `(aref buf i)` — reads element `i`; works for both `:T[]` and `:*T[]`; element type inferred from declared type
+  - `(aset! buf i val)` — writes element `i`
+  - `(aref! buf i)` — bounds-checked read; length read from fat pointer automatically
+  - `(aset!! buf i val)` — bounds-checked write
+  - `(alen buf)` — returns the length; works for both storage forms
+  - Example:
+    ```
+    (let buf :i32[16]                         ;; two WAT locals {alloc(64), 16}
+      (for i 0 (alen buf) (aset! buf i (* i i)))
+      (printf "%d\n" (aref! buf 7)))
+    (defn sum (xs :f64[]) :f64                ;; fat pointer passed as two WAT params
+      (let acc :f64 0.0
+        (for i 0 (alen xs) (set! acc (+ acc (aref xs i))))
+        acc))
+    (deftype Window                            ;; slice field stored in linear memory
+      (samples :*f64[])
+      (size    :i32))
+    ```
+  - **Relation to `Array`**: `Array` = owned growable `{ptr, len, cap}`; `:T[]` = fixed-length slice `{ptr, len}`; `(Array/slice a)` produces a `:f64[]` from an `Array`; after #70 most `Array` uses (fixed-size numeric buffers) can be replaced with `:T[N]`; only push/pop dynamic accumulation still needs `Array`
+  - **Consistency with `:str`**: `:str` is already `{ptr, len}` as two `i32` WAT values; `:T[]` follows the identical pattern; compiler machinery (`watType`, `funcTupleResults`, param expansion) is largely reusable
+  - **Reader**: `[` is not a delimiter so `:i32[16]` is already one atom in `readAtom`; post-process: `:[T][]` → slice type, `:[T][N]` → alloc shorthand, `:*[T][]` / `:*[T][N]` → heap-header variants
+  - **`sizeOf` / `watType`**: `:T[]` → size 8, two WAT params; `:*T[]` → size 4, one WAT param
+  - **`defstatic`**: `(defstatic name :i32[8])` allocates 32 bytes in the data section; `(alen name)` folds to compile-time constant `8`
+  - Migration: existing `(array-ref :i32 buf i)` stays valid; all new syntax is purely additive
 - [x] #26 Tuples — multi-value return via the WASM multi-value proposal: `(defn divmod (a b) (:i32 :i32) ...)` + destructuring `(let (q r) (divmod 10 3) ...)`; avoids struct allocation for result pairs
 - [x] #42 Tuple locals — bind a multi-value result to a named local tuple variable without heap allocation; `(let pair (:i32 :i32) (minmax 4 3) ...)` expands internally to two locals `$pair_0 :i32` and `$pair_1 :i32`; accessors `(pair/0 pair)` and `(pair/1 pair)` read the individual fields; no `deftype` required; types inferred from the callee's declared tuple return annotation or taken from the inline type annotation; depends on #26
 - [x] #27 Value-type structs — the type annotation at the use site determines storage; `deftype` only declares field layout
@@ -90,10 +123,9 @@
 
 - [x] #39 `proc_exit` after `main` — the generated `_start` function should call `proc_exit 0` immediately after `main` returns, ensuring a clean WASI exit code even when `main` does not call `proc_exit` itself
 
-- [ ] #28 Memory management — the current bump allocator never reclaims memory; any loop that allocates will exhaust linear memory
-  - Option 1: `(alloc-reset)` — reset `$heap_ptr` to post-static baseline; frees everything at once; useful for request/response style programs
-  - Option 2: stack allocator — push/pop a stack pointer for scoped allocations; zero overhead within a `let` block
-  - Option 3: real `free` — per-object deallocation via a buddy or slab allocator; complex but necessary for general-purpose programs
+- [x] #28 Memory management — the current bump allocator never reclaims memory; any loop that allocates will exhaust linear memory
+  - [x] Option 1: `(alloc-reset)` — reset `heap-ptr` to post-static baseline; frees everything at once
+  - [x] Option 2: arena stack — `(arena-push)` / `(arena-pop)`, `(with-arena body...)`, `(defn f () :arena ...)` for scoped allocations
 
 - [ ] #50 Ownership and lifetimes for heap-allocated structs — currently nothing in the language tracks who owns a `:*T` pointer or how long it lives
   - The compiler allocates but never frees; callers cannot express "this function gives you ownership" vs "borrow only"

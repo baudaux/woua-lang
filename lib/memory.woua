@@ -23,6 +23,10 @@
 ;; the static data section; treat this global as read-only from user code.
 (defvar heap-ptr :ptr)
 
+;; Baseline heap address (same initial value as heap-ptr, never mutated).
+;; Used by alloc-reset to recover the post-static start of the heap.
+(defvar heap-base :ptr)
+
 ;; Minimum number of pages to grow by at once (16 pages = 1 MiB).
 ;; Amortises the cost of memory.grow calls for programs that allocate frequently.
 (defconst ALLOC-GROW-MIN 16)
@@ -40,3 +44,30 @@
             (drop (memory-grow (if (> needed ALLOC-GROW-MIN) needed ALLOC-GROW-MIN)))))
         (set! heap-ptr new-top)
         ptr))))
+
+;; ── Arena stack ─────────────────────────────────────────────────────────────
+;; Supports up to 8 nested scopes.  (arena-push) saves the current heap-ptr;
+;; (arena-pop) restores it, freeing every allocation made in that scope.
+;; (alloc-reset) discards all heap allocations (resets to the post-static baseline).
+
+(defstatic ARENA-STACK :i32[8])  ;; 8 saved heap-ptr slots = 32 bytes
+(defvar arena-depth :i32)        ;; current nesting depth (0 = empty stack)
+
+;; Save current heap-ptr and open a new arena scope.
+(defmacro arena-push ()
+  (progn
+    (aset! ARENA-STACK arena-depth heap-ptr)
+    (set! arena-depth (+ arena-depth 1))))
+
+;; Close the current arena scope and free all allocations made inside it.
+(defmacro arena-pop ()
+  (progn
+    (set! arena-depth (- arena-depth 1))
+    (set! heap-ptr (aref ARENA-STACK arena-depth))))
+
+;; Discard all heap allocations (reset to the post-static baseline).
+;; Only safe when no heap pointers are still in use.
+(defmacro alloc-reset ()
+  (progn
+    (set! arena-depth 0)
+    (set! heap-ptr heap-base)))

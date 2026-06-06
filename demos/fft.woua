@@ -1,5 +1,4 @@
 (include io)
-(include array)
 (include math)
 (include simd)
 (include svg)
@@ -16,100 +15,91 @@
 
 (defconst CHART-BINS 128)  ;; number of FFT bins to display (0..127)
 
-(defn dump (a :*Array) :void
-    (for n 0 (array-len a)
-        (printf "%d: %f\n" n (array-get :f32 a n))))
+(defn dump (a :f32[]) :void
+    (for n 0 (alen a)
+        (printf "%d: %f\n" n a[n])))
 
-(defn comp-input (fs :f32 len :i32) :*Array
-    (let a :*Array (array-new :f32 len)
+(defn comp-input (fs :f32 len :i32) :f32[]
+    (let a :f32[len]
         (for n 0 len
-            (let t :f32 (/ (as :f32 n) fs))
-                (array-push :f32 a (+ (sin (* 2_PI (* f1 t))) (* 0.5 (sin (* 2_PI (* f2 t)))))))
+            (let t :f32 (/ (as :f32 n) fs)
+                (aset! a n (+ (sin (* 2_PI (* f1 t))) (* 0.5 (sin (* 2_PI (* f2 t))))))))
         a))
 
 ;; for (int n = 0; n < N; n++) {
 ;;    window[n] = 0.5 * (1 - cos(2 * PI * n / (N - 1)));
 ;; }
 
-(defn comp-win (fs :f32 len :i32) :*Array
-    (let a :*Array (array-new :f32 len)
+(defn comp-win (fs :f32 len :i32) :f32[]
+    (let a :f32[len]
         (for n 0 len
-            (array-push :f32 a (* 0.5 (- 1.0 (cos (/ (* 2_PI (as :f32 n)) (as :f32 (- len 1))))))))
+            (aset! a n (* 0.5 (- 1.0 (cos (/ (* 2_PI (as :f32 n)) (as :f32 (- len 1))))))))
         a))
 
-(defn hanning (in :*Array win :*Array offset :i32) :*Array
-    (let a :*Array (array-new :f32 (array-len win))
-        (let i :i32 0
-            (while (< i (array-len win))
-                (progn
-                    (f32x4-store (array-ptr :f32 a i) (* (f32x4-load (array-ptr :f32 in (+ i offset))) (f32x4-load (array-ptr :f32 win i))))
-                    (set! i (+ i 4)))))
-        (Array/len! a (array-len win))
+(defn hanning (in :f32[] win :f32[] offset :i32) :f32[]
+    (let a :f32[N]
+        (let* ((i :i32 0))
+            (while (< i N)
+                (f32x4-store (+ (slice/ptr a) (* i 4))
+                    (* (f32x4-load (+ (slice/ptr in) (* (+ i offset) 4)))
+                       (f32x4-load (+ (slice/ptr win) (* i 4)))))
+                (set! i (+ i 4))))
         a))
 
 ;; Single butterfly: (ar+wr*br-wi*bi, ai+wr*bi+wi*br) and conjugate.
-(defn butterfly (srcRe :*Array srcIm :*Array dstRe :*Array dstIm :*Array
+(defn butterfly (srcRe :f32[] srcIm :f32[] dstRe :f32[] dstIm :f32[]
                  i0 :i32 i1 :i32 wr :f32 wi :f32) :void
-    (let ar :f32 (array-get :f32 srcRe i0)
-    (let ai :f32 (array-get :f32 srcIm i0)
-    (let br :f32 (array-get :f32 srcRe i1)
-    (let bi :f32 (array-get :f32 srcIm i1)
-    (let tr :f32 (- (* wr br) (* wi bi))
-    (let ti :f32 (+ (* wr bi) (* wi br))
-        (progn
-            (array-set :f32 dstRe i0 (+ ar tr))
-            (array-set :f32 dstIm i0 (+ ai ti))
-            (array-set :f32 dstRe i1 (- ar tr))
-            (array-set :f32 dstIm i1 (- ai ti))))))))))
+    (let* ((ar :f32 srcRe[i0])
+           (ai :f32 srcIm[i0])
+           (br :f32 srcRe[i1])
+           (bi :f32 srcIm[i1])
+           (tr :f32 (- (* wr br) (* wi bi)))
+           (ti :f32 (+ (* wr bi) (* wi br))))
+        (aset! dstRe i0 (+ ar tr))
+        (aset! dstIm i0 (+ ai ti))
+        (aset! dstRe i1 (- ar tr))
+        (aset! dstIm i1 (- ai ti))))
 
 ;; One Stockham pass for stage s.  m=2^s, step=2m.
-(defn stockham-stage (srcRe :*Array srcIm :*Array dstRe :*Array dstIm :*Array s :i32) :void
-    (let m    :i32 (<< 1 s)
-    (let step :i32 (<< m 1)
-        (let k :i32 0
-            (while (< k m)
-                (progn
-                    (let angle :f32 (/ (* (neg 2_PI) (as :f32 k)) (as :f32 step))
-                    (let wr    :f32 (cos angle)
-                    (let wi    :f32 (sin angle)
-                        (let g :i32 0
-                            (while (< g (/ N step))
-                                (progn
-                                    (butterfly srcRe srcIm dstRe dstIm
-                                        (+ (* g step) k)
-                                        (+ (* g step) (+ k m))
-                                        wr wi)
-                                    (set! g (+ g 1))))))))
-                    (set! k (+ k 1))))))))
+(defn stockham-stage (srcRe :f32[] srcIm :f32[] dstRe :f32[] dstIm :f32[] s :i32) :void
+    (let* ((m    :i32 (<< 1 s))
+           (step :i32 (<< m 1))
+           (k    :i32 0))
+        (while (< k m)
+            (let* ((angle :f32 (/ (* (neg 2_PI) (as :f32 k)) (as :f32 step)))
+                   (wr    :f32 (cos angle))
+                   (wi    :f32 (sin angle))
+                   (g     :i32 0))
+                (while (< g (/ N step))
+                    (butterfly srcRe srcIm dstRe dstIm
+                        (+ (* g step) k)
+                        (+ (* g step) (+ k m))
+                        wr wi)
+                    (set! g (+ g 1))))
+            (set! k (+ k 1)))))
 
 ;; Stockham FFT: LOG_N stages, ping-pong A↔B, result in reA/imgA (LOG_N even).
-(defn stockham-fft (reA :*Array reB :*Array imgA :*Array imgB :*Array) :void
-    (let s :i32 0
-        (while (< s LOG_N)
-            (progn
-                (if (= (% s 2) 0)
-                    (stockham-stage reA imgA reB imgB s)
-                    (stockham-stage reB imgB reA imgA s))
-                (set! s (+ s 1))))))
+(defn stockham-fft (reA :f32[] reB :f32[] imgA :f32[] imgB :f32[]) :void
+    (for s 0 LOG_N
+        (if (= (% s 2) 0)
+            (stockham-stage reA imgA reB imgB s)
+            (stockham-stage reB imgB reA imgA s))))
 
 ;; Render the FFT magnitude spectrum into the browser SVG canvas.
 ;; Only the first CHART-BINS bins are drawn (the meaningful low-freq range).
-(defn draw-spectrum (reA :*Array imgA :*Array) :void
+(defn draw-spectrum (reA :f32[] imgA :f32[]) :void
     ;; Pass 1 — find peak magnitude across bins 1..CHART-BINS-1 (skip DC)
-    (let max-mag :f32 1.0
-    (let mi :i32 1
-        (progn
-            (while (< mi CHART-BINS)
-                (progn
-                    (let re  :f32 (array-get :f32 reA mi)
-                    (let im  :f32 (array-get :f32 imgA mi)
-                        (let mag :f32 (sqrt (+ (* re re) (* im im)))
-                            (if (> mag max-mag) (set! max-mag mag)))))
-                    (set! mi (+ mi 1))))
-            ;; Pass 2 — open SVG device and draw
-            (let svg-fd :i32 (open-file "/dev/svg" 0)
-            (let buf :*SvgBuf (svg-buf-new 32768)
-                (progn
+    (let* ((max-mag :f32 1.0)
+           (mi      :i32 1))
+        (while (< mi CHART-BINS)
+            (let* ((re  :f32 reA[mi])
+                   (im  :f32 imgA[mi])
+                   (mag :f32 (sqrt (+ (* re re) (* im im)))))
+                (if (> mag max-mag) (set! max-mag mag)))
+            (set! mi (+ mi 1)))
+        ;; Pass 2 — open SVG device and draw
+        (let* ((svg-fd :i32    (open-file "/dev/svg" 0))
+               (buf    :*SvgBuf (svg-buf-new 32768)))
                     (svg-root-attr buf "width"   "1380")
                     (svg-root-attr buf "height"  "430")
                     (svg-root-attr buf "viewBox" "0 0 1380 430")
@@ -120,40 +110,32 @@
                     ;; Frequency grid lines and Hz labels every 16 bins
                     (let li :i32 0
                         (while (<= li CHART-BINS)
-                            (progn
-                                (let lx  :i32 (+ 50 (as :i32 (* (as :f32 li) (/ 1280.0 (as :f32 CHART-BINS)))))
-                                (let fhz :i32 (as :i32 (* (as :f32 li) (/ FREQ (as :f32 N))))
-                                    (progn
-                                        (svg-line buf (string-concat "g" (i32->str li)) lx 50 lx 380 "#1a1a3e")
-                                        (svg-line buf (string-concat "t" (i32->str li)) lx 380 lx 388 "#888888")
-                                        (svg-text buf (string-concat "l" (i32->str li)) (- lx 16) 410 "#aaaaaa"
-                                            (string-concat (i32->str fhz) " Hz")))))
-                                (set! li (+ li 16)))))
+                            (let* ((lx  :i32 (+ 50 (as :i32 (* (as :f32 li) (/ 1280.0 (as :f32 CHART-BINS))))))
+                                   (fhz :i32 (as :i32 (* (as :f32 li) (/ FREQ (as :f32 N))))))
+                                (svg-line buf (string-concat "g" (i32->str li)) lx 50 lx 380 "#1a1a3e")
+                                (svg-line buf (string-concat "t" (i32->str li)) lx 380 lx 388 "#888888")
+                                (svg-text buf (string-concat "l" (i32->str li)) (- lx 16) 410 "#aaaaaa"
+                                    (string-concat (i32->str fhz) " Hz")))
+                            (set! li (+ li 16))))
                     ;; Magnitude bars for bins 0..CHART-BINS-1
                     (let i :i32 0
                         (while (< i CHART-BINS)
-                            (progn
-                                (let re  :f32 (array-get :f32 reA i)
-                                (let im  :f32 (array-get :f32 imgA i)
-                                (let mag :f32 (sqrt (+ (* re re) (* im im)))
-                                (let bh  :f32 (* (/ mag max-mag) 320.0)
-                                (let bw  :f32 (/ 1280.0 (as :f32 CHART-BINS))
-                                (let x   :f32 (+ 50.0 (* (as :f32 i) bw))
-                                (let y   :f32 (- 380.0 bh)
-                                    (svg-rect-f buf (i32->str (+ i 100)) x y (- bw 1.0) bh "#4fc3f7"))))))))
-                                (set! i (+ i 1)))))
-                    (svg-flush-to buf svg-fd))))))))
-
+                            (let* ((re  :f32 reA[i])
+                                   (im  :f32 imgA[i])
+                                   (mag :f32 (sqrt (+ (* re re) (* im im))))
+                                   (bh  :f32 (* (/ mag max-mag) 320.0))
+                                   (bw  :f32 (/ 1280.0 (as :f32 CHART-BINS)))
+                                   (x   :f32 (+ 50.0 (* (as :f32 i) bw)))
+                                   (y   :f32 (- 380.0 bh)))
+                                (svg-rect-f buf (i32->str (+ i 100)) x y (- bw 1.0) bh "#4fc3f7"))
+                            (set! i (+ i 1))))
+                    (svg-flush-to buf svg-fd))))
 (defn main ()
-    (let in :*Array (comp-input FREQ NSAMPLES)
-        (let win :*Array (comp-win FREQ N)
-            (let reA :*Array (hanning in win 0)
-                (let imgA :*Array (array-new :f32 N)
-                (let reB  :*Array (array-new :f32 N)
-                (let imgB :*Array (array-new :f32 N)
-                    (progn
-                        (Array/len! imgA N)
-                        (Array/len! reB  N)
-                        (Array/len! imgB N)
-                        (stockham-fft reA reB imgA imgB)
-                        (draw-spectrum reA imgA)))))))))
+    (let* ((in   :f32[] (comp-input FREQ NSAMPLES))
+           (win  :f32[] (comp-win FREQ N))
+           (reA  :f32[] (hanning in win 0))
+           (imgA :f32[N])
+           (reB  :f32[N])
+           (imgB :f32[N]))
+        (stockham-fft reA reB imgA imgB)
+        (draw-spectrum reA imgA)))

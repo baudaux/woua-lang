@@ -293,6 +293,29 @@ export class Reader {
       }
       return new V128Node(suf, vals);
     }
+
+    // ── Indexing sugar: name[idx] → (aref name idx) ──────────────────────────
+    // Only when the token does NOT start with ':' (which marks a type annotation
+    // like :i32[16]).  The index may be an integer literal or a bare symbol.
+    if (!token.startsWith(":")) {
+      const lb = token.indexOf("[");
+      if (lb > 0 && token.endsWith("]")) {
+        const arefName = token.slice(0, lb);
+        const idxStr   = token.slice(lb + 1, token.length - 1);
+        let idxNode: Node;
+        if (isInteger(idxStr)) {
+          idxNode = new IntNode(I64.parseInt(idxStr), false);
+        } else {
+          idxNode = new SymbolNode(idxStr);
+        }
+        const indexExpr = new ListNode();
+        indexExpr.children.push(new SymbolNode("aref"));
+        indexExpr.children.push(new SymbolNode(arefName));
+        indexExpr.children.push(idxNode);
+        return indexExpr;
+      }
+    }
+
     return new SymbolNode(token);
   }
 

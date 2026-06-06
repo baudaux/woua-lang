@@ -1,0 +1,72 @@
+;; @test match
+;; @feature (match subject (pat expr)... (_ expr)) scalar pattern matching
+;; @expect
+;;   zero
+;;   one
+;;   two
+;;   other
+;;   42
+;;   i64:ok
+;;   f32:ok
+;;   f64:ok
+(include io)
+
+(defn describe (x :i32) :void
+  (printf "%s\n"
+    (match x
+      (0 "zero")
+      (1 "one")
+      (2 "two")
+      (_ "other"))))
+
+(defn main () :i32
+  (describe 0)
+  (describe 1)
+  (describe 2)
+  (describe 99)
+
+  ;; match returns the matched value
+  (let r :i32
+    (match 6
+      (1  10)
+      (6  42)
+      (_  0)))
+  (assert (= r 42) "match returns arm value")
+  (printf "%d\n" r)
+
+  ;; subject evaluated once (complex expression)
+  (let x :i32 3)
+  (let v :i32
+    (match (+ x 1)
+      (4  100)
+      (_  0)))
+  (assert (= v 100) "match evaluates subject once")
+
+  ;; i64
+  (let a :i32
+    (match 2i64
+      (1i64 10)
+      (2i64 20)
+      (_    0)))
+  (assert (= a 20) "i64 match")
+  (printf "i64:ok\n")
+
+  ;; f32
+  (let b :i32
+    (match 1.0
+      (0.0 10)
+      (1.0 20)
+      (_   0)))
+  (assert (= b 20) "f32 match")
+  (printf "f32:ok\n")
+
+  ;; f64
+  (let c :i32
+    (match 3.0f64
+      (1.0f64 10)
+      (3.0f64 30)
+      (_      0)))
+  (assert (= c 30) "f64 match")
+  (printf "f64:ok\n")
+
+  0)

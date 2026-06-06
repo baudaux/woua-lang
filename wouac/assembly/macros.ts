@@ -116,6 +116,22 @@ export function expandDefstatic(args: Array<Node>, env: Env): string {
       return "";
     }
 
+    // :T[N] — allocate N elements of element type T in linear memory.
+    // (defstatic TABLE :i32[8]) → 32 bytes; (alen TABLE) folds to compile-time 8.
+    if (typeName.startsWith(":") && !typeName.startsWith(":*") && typeName.indexOf("[") > 0 && typeName.endsWith("]")) {
+      const lb = typeName.lastIndexOf("[");
+      const elemTypeName = typeName.slice(0, lb); // e.g. ":i32"
+      const sizeStr = typeName.slice(lb + 1, typeName.length - 1); // e.g. "8"
+      const n = i32(I64.parseInt(sizeStr));
+      if (n <= 0) return watError("defstatic :T[N]: N must be a positive integer");
+      const elemSize  = env.sizeOf(elemTypeName);
+      const elemAlign = env.alignOf(elemTypeName);
+      const ptr = env.allocate(n * elemSize, elemAlign);
+      // StaticInfo.len is not used for byte count here; we store it as -1 (byte count irrelevant).
+      env.statics.set(name, new StaticInfo(ptr, -1, typeName));
+      return "";
+    }
+
     // Scalar types: :i32, :f32, :ptr, :i64, :f64
     const align = env.alignOf(typeName);
     const size  = env.sizeOf(typeName);

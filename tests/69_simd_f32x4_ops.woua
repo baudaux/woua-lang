@@ -23,37 +23,37 @@
 (include simd)
 
 (defn main () :void
-  (let a :f32x4 1.0:4.0:9.0:16.0f32x4
-    (let b :f32x4 1.0:2.0:3.0:4.0f32x4
-      (let r+ :f32x4 (+ a b)
-        (let r- :f32x4 (- a b)
-          (let r/ :f32x4 (/ a b)
-            (let rsq :f32x4 (sqrt a)
-              (let rng :f32x4 (neg a)
-                (let rab :f32x4 (abs rng)
-                  (let rmn :f32x4 (min a b)
-                    (let rmx :f32x4 (max a b)
-                      (printf "add: %f %f %f %f\n"
-                        (extract_lane 0 r+) (extract_lane 1 r+)
-                        (extract_lane 2 r+) (extract_lane 3 r+))
-                      (printf "sub: %f %f %f %f\n"
-                        (extract_lane 0 r-) (extract_lane 1 r-)
-                        (extract_lane 2 r-) (extract_lane 3 r-))
-                      (printf "div: %f %f %f %f\n"
-                        (extract_lane 0 r/) (extract_lane 1 r/)
-                        (extract_lane 2 r/) (extract_lane 3 r/))
-                      (printf "sqrt: %f %f %f %f\n"
-                        (extract_lane 0 rsq) (extract_lane 1 rsq)
-                        (extract_lane 2 rsq) (extract_lane 3 rsq))
-                      (printf "neg: %f %f %f %f\n"
-                        (extract_lane 0 rng) (extract_lane 1 rng)
-                        (extract_lane 2 rng) (extract_lane 3 rng))
-                      (printf "abs: %f %f %f %f\n"
-                        (extract_lane 0 rab) (extract_lane 1 rab)
-                        (extract_lane 2 rab) (extract_lane 3 rab))
-                      (printf "min: %f %f %f %f\n"
-                        (extract_lane 0 rmn) (extract_lane 1 rmn)
-                        (extract_lane 2 rmn) (extract_lane 3 rmn))
-                      (printf "max: %f %f %f %f\n"
-                        (extract_lane 0 rmx) (extract_lane 1 rmx)
-                        (extract_lane 2 rmx) (extract_lane 3 rmx)))))))))))))
+  (let* ((a :f32x4 1.0:4.0:9.0:16.0f32x4)
+         (b :f32x4 1.0:2.0:3.0:4.0f32x4)
+         (r+ :f32x4 (+ a b))
+         (r- :f32x4 (- a b))
+         (r/ :f32x4 (/ a b))
+         (rsq :f32x4 (sqrt a))
+         (rng :f32x4 (neg a))
+         (rab :f32x4 (abs rng))
+         (rmn :f32x4 (min a b))
+         (rmx :f32x4 (max a b)))
+    (printf "add: %f %f %f %f\n"
+      (extract_lane 0 r+) (extract_lane 1 r+)
+      (extract_lane 2 r+) (extract_lane 3 r+))
+    (printf "sub: %f %f %f %f\n"
+      (extract_lane 0 r-) (extract_lane 1 r-)
+      (extract_lane 2 r-) (extract_lane 3 r-))
+    (printf "div: %f %f %f %f\n"
+      (extract_lane 0 r/) (extract_lane 1 r/)
+      (extract_lane 2 r/) (extract_lane 3 r/))
+    (printf "sqrt: %f %f %f %f\n"
+      (extract_lane 0 rsq) (extract_lane 1 rsq)
+      (extract_lane 2 rsq) (extract_lane 3 rsq))
+    (printf "neg: %f %f %f %f\n"
+      (extract_lane 0 rng) (extract_lane 1 rng)
+      (extract_lane 2 rng) (extract_lane 3 rng))
+    (printf "abs: %f %f %f %f\n"
+      (extract_lane 0 rab) (extract_lane 1 rab)
+      (extract_lane 2 rab) (extract_lane 3 rab))
+    (printf "min: %f %f %f %f\n"
+      (extract_lane 0 rmn) (extract_lane 1 rmn)
+      (extract_lane 2 rmn) (extract_lane 3 rmn))
+    (printf "max: %f %f %f %f\n"
+      (extract_lane 0 rmx) (extract_lane 1 rmx)
+      (extract_lane 2 rmx) (extract_lane 3 rmx))))

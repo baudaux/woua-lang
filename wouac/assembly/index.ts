@@ -17,6 +17,7 @@ import { Reader } from "./reader";
 import { Env, StaticInfo, LiteralInfo } from "./env";
 import { expandAll } from "./expander";
 import { generateModule } from "./codegen";
+import { watToWasm } from "./wasm_encoder";
 
 // ── Preopened-directory file open ────────────────────────────────────────────
 //
@@ -149,6 +150,32 @@ function readPathString(path: string): string | null {
   heap.free(nrBuf);
   fd_close(rawFd as fd);
   return result;
+}
+
+// Wrap openPath for writing binary data
+function writePathBytes(path: string, data: Array<u8>): bool {
+  let rawFd = openPath(path, true);
+  if (rawFd < 0) return false;
+  const len = data.length as usize;
+  // @ts-ignore
+  let buf = heap.alloc(len > 0 ? len : 1);
+  for (let i = 0; i < data.length; i++) store<u8>(buf + i, data[i] as u8);
+  // @ts-ignore
+  let iov   = heap.alloc(8);
+  // @ts-ignore
+  let nwBuf = heap.alloc(4);
+  store<u32>(iov,     buf as u32);
+  store<u32>(iov + 4, len as u32);
+  // @ts-ignore
+  fd_write(rawFd as fd, iov, 1, nwBuf);
+  // @ts-ignore
+  heap.free(buf);
+  // @ts-ignore
+  heap.free(iov);
+  // @ts-ignore
+  heap.free(nwBuf);
+  fd_close(rawFd as fd);
+  return true;
 }
 
 // Wrap openPath for writing
@@ -335,6 +362,7 @@ export function _start(): void {
   let inputArg  = "";
   let outputArg = "";
   let emitMap   = false;
+  let emitWasm  = false;
   let noPeephole = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] == "--help" || args[i] == "-h") {
@@ -348,6 +376,8 @@ export function _start(): void {
         "  source.woua         Input source file\n" +
         "  -o, --output <file> Output file (default: stdout)\n" +
         "  -map                Write a <output>.map file with static memory layout\n" +
+        "  -wasm               Also write a .wasm binary alongside the .wat (requires -o)\n" +
+        "  Note: -o foo.wasm writes WASM directly (no separate .wat needed)\n" +
         "  --no-peephole       Disable WAT peephole optimizer\n" +
         "  --lib <dir>         Library directory (default: lib/)\n" +
         "  --help, -h          Show this help message\n" +
@@ -374,9 +404,12 @@ export function _start(): void {
       i++;
     } else if ((args[i] == "-o" || args[i] == "--output") && i + 1 < args.length) {
       outputArg = args[i + 1];
+      if (outputArg.endsWith(".wasm")) emitWasm = true;
       i++;
     } else if (args[i] == "-map") {
       emitMap = true;
+    } else if (args[i] == "-wasm" || args[i] == "--wasm") {
+      emitWasm = true;
     } else if (args[i] == "--no-peephole") {
       noPeephole = true;
     } else if (inputArg == "") {
@@ -436,15 +469,37 @@ export function _start(): void {
     return;
   }
 
-  // -- Write WAT to stdout or file --------------------------------------------
-  if (outputArg != "") {
+  // -- Write WAT (skip if output is a .wasm path — binary written below) ------
+  if (outputArg != "" && !outputArg.endsWith(".wasm")) {
     if (!writePathString(outputArg, wat)) {
       Console.error("wouac: cannot open output file: " + outputArg + "\n");
       Process.exit(1);
       return;
     }
-  } else {
+  } else if (outputArg == "") {
     Console.log(wat);
+  }
+
+  // -- Write .wasm binary (explicit -wasm flag or -o *.wasm) -------------------
+  if (emitWasm) {
+    if (outputArg == "") {
+      Console.error("wouac: -wasm requires -o <output>; wasm file not written\n");
+    } else {
+      let wasmPath = outputArg;
+      if (wasmPath.endsWith(".wat")) wasmPath = wasmPath.slice(0, wasmPath.length - 4) + ".wasm";
+      else if (!wasmPath.endsWith(".wasm")) wasmPath = wasmPath + ".wasm";
+      const wasmBytes = watToWasm(wat);
+      if (wasmBytes.length == 0) {
+        Console.error("wouac: wasm encoding failed (undefined reference)\n");
+        Process.exit(1);
+        return;
+      }
+      if (!writePathBytes(wasmPath, wasmBytes)) {
+        Console.error("wouac: cannot write wasm file: " + wasmPath + "\n");
+        Process.exit(1);
+        return;
+      }
+    }
   }
 
   // -- Optionally write .map file --------------------------------------------

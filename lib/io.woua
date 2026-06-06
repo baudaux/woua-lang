@@ -134,6 +134,15 @@
 (defmacro printf (fmt ...args)
   (drop (printf-impl fmt 0 args)))
 
+;; ── sprintf ──────────────────────────────────────────────────────────────────
+;; (sprintf buf "format" args...) → :i32  bytes written
+;; Write a formatted string into the caller-supplied buffer `buf` (:ptr / :i32).
+;; The format string must be a compile-time string literal.
+;; Same specifiers as printf: %d %i %ld %li %s %c %f %lf %%
+;; Returns the number of bytes written (not including a null terminator).
+;; No bounds checking — the caller is responsible for ensuring buf is large enough.
+;; Compiler intrinsic: handled by the expander, not this macro definition.
+
 ;; read-line: read one line from fd into buf (up to maxlen bytes), byte by byte.
 ;; Strips the trailing newline. Returns a str pointing into buf,
 ;; or a zero-length str on EOF.

@@ -15,19 +15,19 @@
 (defn fib-opt (n :i32) :i32
   (if (< n 2)
     n
-    (let acc :i32 0
-      (let k :i32 n
+    (let* ((acc :i32 0)
+           (k   :i32 n))
+      (set! acc (+ acc (fib-opt (- k 1))))
+      (set! k (- k 2))
+      (while (> k 1)
         (set! acc (+ acc (fib-opt (- k 1))))
-        (set! k (- k 2))
-        (while (> k 1)
-          (set! acc (+ acc (fib-opt (- k 1))))
-          (set! k (- k 2)))
-        (+ k acc)))))
+        (set! k (- k 2)))
+      (+ k acc))))
 
 (defn main () :void
-  (let start :i64 (time-now-ns)
-    (let result :i32 (fib-opt 43)
-      (let elapsed :i64 (- (time-now-ns) start)
-        (printf "fib_opt(43) = %d, time = %ld ms\n"
-          result
-          (/ elapsed 1000000i64))))))
+  (let* ((start   :i64 (time-now-ns))
+         (result  :i32 (fib-opt 43))
+         (elapsed :i64 (- (time-now-ns) start)))
+    (printf "fib_opt(43) = %d, time = %ld ms\n"
+      result
+      (/ elapsed 1000000i64))))

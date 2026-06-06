@@ -32,7 +32,7 @@ import {
   watI64Store, watI64Load,
   watF32Store, watF32Load, watF64Store, watF64Load,
   watIf, watBlock, watLoop, watBrIf, watBr,
-  watCall, watDrop, watReturn,
+  watCall, watReturnCall, watDrop, watReturn,
 } from "./primitives";
 import { peepholeOptimizeBody } from "./peephole";
 
@@ -56,6 +56,10 @@ export function generateModule(forms: Array<ExpandedForm>, env: Env): string {
       // :str return annotation is treated as a two-value tuple (:i32 :i32).
       const scalarAnnot = extractScalarReturnAnnotation(list);
       if (scalarAnnot == ":str") {
+        env.funcTupleResults.set(fname, [":i32", ":i32"]);
+        env.funcResultTypes.set(fname, "");
+      } else if (scalarAnnot != null && isSliceType(scalarAnnot)) {
+        // :T[] return annotation → fat-pointer (ptr, len) = two i32 results.
         env.funcTupleResults.set(fname, [":i32", ":i32"]);
         env.funcResultTypes.set(fname, "");
       } else if (scalarAnnot != null && isValueTypeAnnot(scalarAnnot, env)) {
@@ -137,6 +141,77 @@ function watType(t: string): string {
 
 // ─── Struct type helpers ─────────────────────────────────────────────────────
 
+// ─── Slice type helpers ───────────────────────────────────────────────────────
+
+// True if `t` is a fat-pointer slice type: `:T[]` or `:T[N]` (not `:*T[]`).
+// These expand to two WAT locals/params just like `:str`.
+function isSliceType(t: string): bool {
+  return t.startsWith(":") && !t.startsWith(":*") && t.indexOf("[") > 0;
+}
+
+// True when `t` is a pointer-to-slice: `:*T[]` or `:*T[N]`.
+// These store the {ptr, len} header in linear memory; the variable is a single i32.
+function isPtrSliceType(t: string): bool {
+  return t.startsWith(":*") && t.indexOf("[") > 0;
+}
+
+// True when `t` is a pointer-to-alloc-slice: `:*T[N]` with non-empty N.
+// `(let buf :*f32[4] ...)` allocates both the element buffer and the 8-byte header.
+function isPtrAllocSliceType(t: string): bool {
+  if (!isPtrSliceType(t)) return false;
+  const lb = t.lastIndexOf("[");
+  return t.slice(lb + 1, t.length - 1).length > 0;
+}
+
+// Extract the element type from a pointer-to-slice annotation.
+//   :*f32[]  → :f32
+//   :*f32[4] → :f32
+//   :*i32[N] → :i32
+function ptrSliceElemType(t: string): string {
+  const lb = t.indexOf("[");
+  if (lb < 0) return ":i32";
+  return ":" + t.slice(2, lb); // strip ":*" prefix up to "["
+}
+
+// True if `t` is an alloc-shorthand slice: `:T[N]` where N is non-empty.
+// (`:T[]` with empty brackets is a plain slice without auto-alloc.)
+function isAllocSliceType(t: string): bool {
+  if (!isSliceType(t)) return false;
+  const lb = t.lastIndexOf("[");
+  return t.slice(lb + 1, t.length - 1).length > 0; // non-empty content
+}
+
+// Extract the element type from a slice annotation.
+//   :i32[]   → :i32
+//   :i32[16] → :i32
+//   :f64[]   → :f64
+//   :Point[] → :Point
+function sliceElemType(t: string): string {
+  const lb = t.indexOf("[");
+  if (lb < 0) return ":i32";
+  return t.slice(0, lb); // ":i32" from ":i32[]" or ":i32[16]"
+}
+
+// Return a WAT expression for the size N in `:T[N]`.
+// N may be a decimal literal, a defconst name, or a local variable name.
+function sliceAllocSizeWat(sizeStr: string, env: Env): string {
+  // Pure integer literal
+  let allDigits = sizeStr.length > 0;
+  for (let i = 0; i < sizeStr.length; i++) {
+    const c = sizeStr.charCodeAt(i);
+    if (c < 48 || c > 57) { allDigits = false; break; }
+  }
+  if (allDigits) return "(i32.const " + sizeStr + ")";
+  // Known defconst (zero-arg macro expanding to an IntNode)
+  if (env.macros.has(sizeStr)) {
+    const m = env.macros.get(sizeStr);
+    if (m.params.length == 0 && m.body.tag == TAG_INT)
+      return "(i32.const " + (m.body as IntNode).value.toString() + ")";
+  }
+  // Assume it's a local variable
+  return "(local.get $" + sizeStr + ")";
+}
+
 // True if `t` is a value-type struct annotation: `:TypeName` where TypeName is
 // registered in env.types (not a primitive, :str, :void, or :*TypeName).
 function isValueTypeAnnot(t: string, env: Env): bool {
@@ -147,6 +222,7 @@ function isValueTypeAnnot(t: string, env: Env): bool {
       t == ":ptr" || t == ":u8"  || t == ":str" || t == ":void" || t == ":v128") return false;
   if (isSimdSubtype(t)) return false;
   if (t.startsWith(":func:")) return false;
+  if (isSliceType(t)) return false; // :T[] and :T[N] are slice types, not user structs
   return env.types.has(t.slice(1));
 }
 
@@ -290,12 +366,15 @@ function assembleModule(env: Env): string {
   }
   if (env.dataEntries.length > 0) out += "\n";
 
-  // Patch heap-ptr's WAT initializer to the first byte past static data (8-byte aligned).
-  // lib/memory.woua (included via core.woua) declares (defvar heap-ptr :ptr) with a
-  // placeholder zero; the correct address is only known here after static layout is done.
+  // Patch heap-ptr and heap-base to the first byte past static data (8-byte aligned).
+  // lib/memory.woua declares both as (defvar ... :ptr) with placeholder zero;
+  // heap-base is never mutated — it records the permanent baseline for alloc-reset.
   const alignedHeap = (env.memoryOffset + 7) & ~7;
   if (env.globals.has("heap-ptr")) {
     env.globals.get("heap-ptr").initWat = "(i32.const " + alignedHeap.toString() + ")";
+  }
+  if (env.globals.has("heap-base")) {
+    env.globals.get("heap-base").initWat = "(i32.const " + alignedHeap.toString() + ")";
   }
 
   // User-defined mutable globals from (defvar ...)
@@ -324,18 +403,24 @@ function assembleModule(env: Env): string {
     reachable.add(fname);
     if (!env.funcBodies.has(fname)) continue;
     const body = env.funcBodies.get(fname);
-    // Scan for (call $foo) references in the WAT body
+    // Scan for (call $foo) and (return_call $foo) references in the WAT body
     let pos = 0;
     while (pos < body.length) {
-      const idx = body.indexOf("(call $", pos);
+      let idx = body.indexOf("(call $", pos);
+      const ridx = body.indexOf("(return_call $", pos);
+      // Pick whichever comes first; prefer return_call if it's at the same position
+      // (return_call starts with "(call $" so indexOf("(call $") would also match it
+      // at that position — but only the longer "(return_call $" prefix is correct there)
+      const pfxLen: i32 = (ridx != -1 && (idx == -1 || ridx <= idx)) ? 14 : 7;
+      if (pfxLen == 14) idx = ridx;
       if (idx == -1) break;
-      let end = idx + 7;
+      let end = idx + pfxLen;
       while (end < body.length) {
         const c = body.charAt(end);
         if (c == " " || c == ")" || c == "\n" || c == "\t") break;
         end++;
       }
-      const callee = body.slice(idx + 7, end);
+      const callee = body.slice(idx + pfxLen, end);
       if (!reachable.has(callee)) queue.push(callee);
       pos = end;
     }
@@ -472,6 +557,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
     const op = (list.children[0] as SymbolNode).name;
     if (op == "as") return (list.children[1] as SymbolNode).name;
     if (op == "set!" || op == "drop" || op == "i32.store" || op == "i32.store8" || op == "array-set!" || op == "v128.store") return "";
+    if (op == "aset!" || op == "aset!!") return ""; // slice element write → void
     if (op.includes("/") && op.endsWith("!")) return ""; // struct setter → void
     if (op == "let") {
       // ── Tuple destructuring ──────────────────────────────────────────────────
@@ -535,7 +621,7 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
       if (list.children.length < 2) return "";
       return typeOf(list.children[list.children.length - 1], env, locals);
     }
-    if (op == "progn") {
+    if (op == "progn" || op == "with-arena") {
       if (list.children.length < 2) return "";
       return typeOf(list.children[list.children.length - 1], env, locals);
     }
@@ -584,6 +670,15 @@ function typeOf(node: Node, env: Env, locals: Map<string, string>): string {
         return (list.children[1] as SymbolNode).name; // :T
       return ":i32";
     }
+    // ── Typed slice ops ──────────────────────────────────────────────────────
+    if (op == "aref" || op == "aref!") {
+      const bufType = typeOf(list.children[1], env, locals);
+      const et = sliceElemType(bufType);
+      // Struct element type: aref returns :*StructType (address of the slot)
+      if (isValueTypeAnnot(et, env)) return ":*" + et.slice(1); // :Vec2 → :*Vec2
+      return et; // :i32[] → :i32, :f64[16] → :f64
+    }
+    if (op == "alen") return ":i32";
     if (env.ops.has(op)) {
       const argTypes = new Array<string>();
       for (let i = 1; i < list.children.length; i++) {
@@ -648,6 +743,30 @@ function extractTupleAnnotation(list: ListNode, pos: i32): Array<string> | null 
   return types;
 }
 
+// ── Arena helpers ───────────────────────────────────────────────────────────
+// These emit raw WAT for arena-push / arena-pop without going through macro
+// expansion.  Used by (with-arena ...) and (defn ... :arena ...).
+
+function arenaStackAddr(env: Env): i32 {
+  if (!env.statics.has("ARENA-STACK")) {
+    env.errors.push("with-arena / :arena requires (include memory) — ARENA-STACK static not found");
+    return 0;
+  }
+  return env.statics.get("ARENA-STACK").ptr;
+}
+
+function emitArenaPushWat(addr: i32): string {
+  const a = addr.toString();
+  return "(i32.store (i32.add (i32.const " + a + ") (i32.mul (global.get $arena-depth) (i32.const 4))) (global.get $heap-ptr))\n    "
+       + "(global.set $arena-depth (i32.add (global.get $arena-depth) (i32.const 1)))";
+}
+
+function emitArenaPopWat(addr: i32): string {
+  const a = addr.toString();
+  return "(global.set $arena-depth (i32.sub (global.get $arena-depth) (i32.const 1)))\n    "
+       + "(global.set $heap-ptr (i32.load (i32.add (i32.const " + a + ") (i32.mul (global.get $arena-depth) (i32.const 4)))))";
+}
+
 // Returns the explicit scalar return type annotation at children[3] of a defn
 // list (e.g. ":i32", ":void", ":f32"), or null if not present.
 // Mutually exclusive with extractTupleAnnotation — call that first.
@@ -685,6 +804,12 @@ function inferDefnResultType(list: ListNode, env: Env): string {
   }
 
   const bodyStart = 3;
+  // Skip optional :arena modifier so type inference reaches the actual body.
+  let bodyStartInfer = bodyStart;
+  if (bodyStartInfer < list.children.length) {
+    const maybeArena = list.children[bodyStartInfer];
+    if (maybeArena.tag == TAG_SYMBOL && (maybeArena as SymbolNode).name == ":arena") bodyStartInfer++;
+  }
   const params = list.children[2] as ListNode;
   const paramLocals = new Map<string, string>();
   for (let i = 0; i < params.children.length; i++) {
@@ -707,9 +832,9 @@ function inferDefnResultType(list: ListNode, env: Env): string {
       collectValueTypeSubLocals(pname, valueTypeName(ptype), env, paramLocals);
     }
   }
-  if (list.children.length <= bodyStart) return "";
+  if (list.children.length <= bodyStartInfer) return "";
   const letLocals = new Map<string, string>();
-  for (let i = bodyStart; i < list.children.length; i++) {
+  for (let i = bodyStartInfer; i < list.children.length; i++) {
     collectLetLocals(list.children[i], env, paramLocals, letLocals);
   }
   const locals = copyLocals(paramLocals);
@@ -819,6 +944,11 @@ function collectLetLocals(node: Node, env: Env, paramLocals: Map<string, string>
         letLocals.set(letName, ":str"); // marker (not a real WAT local)
         letLocals.set(letName + "_ptr", ":i32");
         letLocals.set(letName + "_len", ":i32");
+      } else if (isSliceType(typeAnnot)) {
+        // :T[] and :T[N] locals expand to two WAT locals: name_ptr and name_len.
+        letLocals.set(letName, typeAnnot); // marker (not a real WAT local)
+        letLocals.set(letName + "_ptr", ":i32");
+        letLocals.set(letName + "_len", ":i32");
       } else if (isValueTypeAnnot(typeAnnot, env)) {
         // Value-type struct: marker + recursively expand all leaf field locals.
         letLocals.set(letName, typeAnnot); // marker (not a real WAT local)
@@ -852,7 +982,18 @@ function codegenDefn(list: ListNode, env: Env): string {
   // Detect optional tuple or scalar return annotation at children[3]
   const tupleTypes = extractTupleAnnotation(list, 3);
   const scalarAnnot = tupleTypes == null ? extractScalarReturnAnnotation(list) : null;
-  const bodyStart  = (tupleTypes != null || scalarAnnot != null) ? 4 : 3;
+  let bodyStart  = (tupleTypes != null || scalarAnnot != null) ? 4 : 3;
+
+  // Detect optional :arena modifier — the first non-annotation symbol after params.
+  // Syntax: (defn name (params) [:rettype] :arena body...)
+  let isArenaDefn = false;
+  if (bodyStart < list.children.length) {
+    const maybeArena = list.children[bodyStart];
+    if (maybeArena.tag == TAG_SYMBOL && (maybeArena as SymbolNode).name == ":arena") {
+      isArenaDefn = true;
+      bodyStart++;
+    }
+  }
 
   // Build locals map: param name → type.
   // Syntax: (name :Type name :Type ...) — type annotation is optional, defaults to :i32.
@@ -895,6 +1036,9 @@ function codegenDefn(list: ListNode, env: Env): string {
     if (paramLocals.get(paramNames[i]) == ":str") {
       locals.set(paramNames[i] + "_ptr", ":i32");
       locals.set(paramNames[i] + "_len", ":i32");
+    } else if (isSliceType(paramLocals.get(paramNames[i]))) {
+      locals.set(paramNames[i] + "_ptr", ":i32");
+      locals.set(paramNames[i] + "_len", ":i32");
     }
   }
 
@@ -907,6 +1051,11 @@ function codegenDefn(list: ListNode, env: Env): string {
     if (ptype == ":str") {
       paramDecls += " (param $" + pname + "_ptr i32) (param $" + pname + "_len i32)";
       // Make _ptr and _len available in paramLocals for downstream type inference.
+      paramLocals.set(pname + "_ptr", ":i32");
+      paramLocals.set(pname + "_len", ":i32");
+    } else if (isSliceType(ptype)) {
+      // :T[] params expand to two WAT params: $name_ptr i32 and $name_len i32.
+      paramDecls += " (param $" + pname + "_ptr i32) (param $" + pname + "_len i32)";
       paramLocals.set(pname + "_ptr", ":i32");
       paramLocals.set(pname + "_len", ":i32");
     } else if (isValueTypeAnnot(ptype, env)) {
@@ -932,6 +1081,8 @@ function codegenDefn(list: ListNode, env: Env): string {
   } else if (scalarAnnot != null) {
     if (scalarAnnot == ":str") {
       resultDecl = " (result i32 i32)"; // :str = fat-pointer (ptr, len)
+    } else if (isSliceType(scalarAnnot)) {
+      resultDecl = " (result i32 i32)"; // :T[] = fat-pointer slice (ptr, len)
     } else if (isValueTypeAnnot(scalarAnnot, env)) {
       // Value-type struct return → multi-value of leaf field types (recursive)
       const vtN = valueTypeName(scalarAnnot);
@@ -964,14 +1115,24 @@ function codegenDefn(list: ListNode, env: Env): string {
   for (let k = 0; k < letKeys.length; k++) {
     const lt = letLocals.get(letKeys[k]);
     if (lt == ":str") continue; // skip marker; _ptr and _len are emitted separately
+    if (isSliceType(lt)) continue; // skip :T[] / :T[N] marker; _ptr and _len emitted separately
     if (isValueTypeAnnot(lt, env)) continue; // skip marker; field locals are emitted separately
     localDecls += "\n    " + watLocalDecl(letKeys[k], watType(lt));
   }
 
   // Codegen body expressions (let will emit only local.set, not local decl)
   let bodyWat = "";
+  if (isArenaDefn) {
+    const arAddr = arenaStackAddr(env);
+    bodyWat += "\n    " + emitArenaPushWat(arAddr);
+  }
   for (let i = bodyStart; i < list.children.length; i++) {
-    bodyWat += "\n    " + codegenExpr(list.children[i], env, locals);
+    const isTailPos = i == list.children.length - 1;
+    bodyWat += "\n    " + codegenExpr(list.children[i], env, locals, isTailPos);
+  }
+  if (isArenaDefn) {
+    const arAddr = arenaStackAddr(env);
+    bodyWat += "\n    " + emitArenaPopWat(arAddr);
   }
 
   return "  (; defn " + name + " ;)\n  (func $" + name + paramDecls + resultDecl
@@ -1068,15 +1229,15 @@ function emitStructFieldStores(basePtr: string, absOffset: i32, argNode: Node,
     ? basePtr
     : "(i32.add " + basePtr + " (i32.const " + absOffset.toString() + "))";
   if (ftype == ":u8")
-    return "\n    (i32.store8 " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+    return "\n    (i32.store8 " + ptrExpr + " " + codegenExpr(argNode, env, locals, false) + ")";
   if (ftype == ":i32" || ftype == ":ptr" || ftype.startsWith(":*"))
-    return "\n    (i32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+    return "\n    (i32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals, false) + ")";
   if (ftype == ":f32")
-    return "\n    (f32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+    return "\n    (f32.store " + ptrExpr + " " + codegenExpr(argNode, env, locals, false) + ")";
   if (ftype == ":i64")
-    return "\n    (i64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+    return "\n    (i64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals, false) + ")";
   if (ftype == ":f64")
-    return "\n    (f64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals) + ")";
+    return "\n    (f64.store " + ptrExpr + " " + codegenExpr(argNode, env, locals, false) + ")";
   // Embedded struct: recurse into constructor args
   const innerTypeName = ftype.startsWith(":") ? ftype.slice(1) : ftype;
   if (env.types.has(innerTypeName) && argNode.tag == TAG_LIST) {
@@ -1157,7 +1318,7 @@ function ifResultDecl(node: Node, env: Env, locals: Map<string, string>): string
   return t != "" ? watType(t) : "";
 }
 
-function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string {
+function codegenExpr(node: Node, env: Env, locals: Map<string, string>, emitTC: i32): string {
 
   // Source comment — emit as WAT block comment
   if (node.tag == TAG_COMMENT) {
@@ -1218,12 +1379,22 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
         return "(i32.const " + info.ptr.toString() + ") (i32.const " + info.len.toString() + ")";
       }
       // Any other static (struct pointer, scalar) — push its address as i32
+      // Exception: :T[N] statics used as :T[] fat-pointer args → push (ptr, len)
+      if (isAllocSliceType(info.typeName)) {
+        const slb = info.typeName.lastIndexOf("[");
+        const nStr = info.typeName.slice(slb + 1, info.typeName.length - 1);
+        return "(i32.const " + info.ptr.toString() + ") (i32.const " + nStr + ")";
+      }
       return "(i32.const " + info.ptr.toString() + ")";
     }
     // Mutable global variable
     if (env.globals.has(sym)) return "(global.get $" + sym + ")";
     // :str local → push two values (ptr, len)
     if (locals.has(sym) && locals.get(sym) == ":str") {
+      return "(local.get $" + sym + "_ptr) (local.get $" + sym + "_len)";
+    }
+    // :T[] / :T[N] local → push two values (ptr, len) just like :str
+    if (locals.has(sym) && isSliceType(locals.get(sym))) {
       return "(local.get $" + sym + "_ptr) (local.get $" + sym + "_len)";
     }
     // Value-type struct local → push all field values (used when passing as arg or returning)
@@ -1242,13 +1413,13 @@ function codegenExpr(node: Node, env: Env, locals: Map<string, string>): string 
 
   // List — call or special form
   if (node.tag == TAG_LIST) {
-    return codegenList(node as ListNode, env, locals);
+    return codegenList(node as ListNode, env, locals, emitTC);
   }
 
   return ";; ERROR: unknown node tag " + node.tag.toString();
 }
 
-function codegenList(list: ListNode, env: Env, locals: Map<string, string>): string {
+function codegenList(list: ListNode, env: Env, locals: Map<string, string>, emitTC: i32): string {
   if (list.children.length == 0) return "";
 
   const head = list.children[0];
@@ -1264,7 +1435,16 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     const targetType = (list.children[1] as SymbolNode).name;
     const inner      = list.children[2];
     const srcType    = typeOf(inner, env, locals);
-    const innerWat   = codegenExpr(inner, env, locals);
+    const innerWat   = codegenExpr(inner, env, locals, false);
+
+    // :*T[] → :T[]: cast a pointer-to-slice-header to a fat-pointer slice.
+    // Loads {ptr, len} from the header at the given address.
+    if (isPtrSliceType(srcType) && isSliceType(targetType)) {
+      // Duplicate the inner expression only when it is pure (no side effects).
+      if (isPureWat(innerWat))
+        return "(i32.load " + innerWat + ") (i32.load (i32.add " + innerWat + " (i32.const 4)))";
+      return ";; ERROR: as :T[]: source expression has side effects — bind to a local first";
+    }
 
     // i32 → i64
     if ((srcType == ":i32" || srcType == ":ptr") && targetType == ":i64")
@@ -1312,26 +1492,26 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     if (resolved.watOp.includes(".")) {
       let out = "(" + resolved.watOp;
       for (let i = 1; i < list.children.length; i++) {
-        out += " " + codegenExpr(list.children[i], env, locals);
+        out += " " + codegenExpr(list.children[i], env, locals, false);
       }
       return out + ")";
     } else {
       // Function-name dispatch: (call $fn arg0 arg1 ...)
       const args2 = new Array<string>();
       for (let i = 1; i < list.children.length; i++) {
-        args2.push(codegenExpr(list.children[i], env, locals));
+        args2.push(codegenExpr(list.children[i], env, locals, false));
       }
-      return watCall(resolved.watOp, args2);
+      return emitTC ? watReturnCall(resolved.watOp, args2) : watCall(resolved.watOp, args2);
     }
   }
 
   // ── (while cond body...) ─────────────────────────────────────────────
   // Compiles to a WAT block/loop pair with br_if for the exit condition.
   if (op == "while") {
-    const cond = codegenExpr(list.children[1], env, locals);
+    const cond = codegenExpr(list.children[1], env, locals, false);
     let bodyParts = watBrIf("__while_break", "(i32.eqz " + cond + ")");
     for (let i = 2; i < list.children.length; i++) {
-      bodyParts += "\n    " + codegenExpr(list.children[i], env, locals);
+      bodyParts += "\n    " + codegenExpr(list.children[i], env, locals, false);
     }
     bodyParts += "\n    " + watBr("__while_loop");
     return watBlock("__while_break", watLoop("__while_loop", bodyParts));
@@ -1339,16 +1519,16 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
 
   // ── (if cond then else?) ───────────────────────────────────────────────────
   if (op == "if") {
-    const cond = codegenExpr(list.children[1], env, locals);
+    const cond = codegenExpr(list.children[1], env, locals, false);
     // Skip any interleaved comment nodes to find the real then/else branches.
     let thenIdx = 2;
     while (thenIdx < list.children.length && list.children[thenIdx].tag == TAG_COMMENT) thenIdx++;
     let elseIdx = thenIdx + 1;
     while (elseIdx < list.children.length && list.children[elseIdx].tag == TAG_COMMENT) elseIdx++;
     const thenExpr = thenIdx < list.children.length
-      ? codegenExpr(list.children[thenIdx], env, locals) : "";
+      ? codegenExpr(list.children[thenIdx], env, locals, emitTC) : "";
     const elseExpr = elseIdx < list.children.length
-      ? codegenExpr(list.children[elseIdx], env, locals) : "";
+      ? codegenExpr(list.children[elseIdx], env, locals, emitTC) : "";
     // Include (result T...) when the if produces a value (has an else branch).
     // If the then branch is (values ...), emit a multi-value result declaration.
     let resultWat = "";
@@ -1375,7 +1555,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       }
       const pnames = new Array<string>(); const ptypes = new Array<string>();
       parseTuplePattern(pattern, inferredTypes, pnames, ptypes);
-      const callWat = codegenExpr(list.children[2], env, locals);
+      const callWat = codegenExpr(list.children[2], env, locals, false);
       const newLocals = copyLocals(locals);
       for (let k = 0; k < pnames.length; k++) newLocals.set(pnames[k], ptypes[k]);
       // Emit the call, then local.sets in reverse order (stack is LIFO)
@@ -1390,7 +1570,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         body += "\n    (local.set $" + pnames[k] + ")";
       }
       for (let i = 3; i < list.children.length; i++) {
-        body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        body += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
       }
       return body;
     }
@@ -1399,7 +1579,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       const tlocTypes = extractTupleAnnotation(list, 2);
       if (tlocTypes != null) {
         const tname = (list.children[1] as SymbolNode).name;
-        const callWat = codegenExpr(list.children[3], env, locals);
+        const callWat = codegenExpr(list.children[3], env, locals, false);
         const newLocals = copyLocals(locals);
         newLocals.set(tname, "tuple");
         for (let k = 0; k < tlocTypes.length; k++) newLocals.set(tname + "_" + k.toString(), tlocTypes[k]);
@@ -1408,7 +1588,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
           body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
         }
         for (let i = 4; i < list.children.length; i++) {
-          body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+          body += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
         }
         return body;
       }
@@ -1418,7 +1598,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       const iTypes = inferredTupleTypes(list.children[2], env);
       if (iTypes != null) {
         const tname = (list.children[1] as SymbolNode).name;
-        const callWat = codegenExpr(list.children[2], env, locals);
+        const callWat = codegenExpr(list.children[2], env, locals, false);
         const newLocals = copyLocals(locals);
         newLocals.set(tname, "tuple");
         for (let k = 0; k < iTypes.length; k++) newLocals.set(tname + "_" + k.toString(), iTypes[k]);
@@ -1427,7 +1607,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
           body += "\n    (local.set $" + tname + "_" + k.toString() + ")";
         }
         for (let i = 3; i < list.children.length; i++) {
-          body += "\n    " + codegenExpr(list.children[i], env, newLocals);
+          body += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
         }
         return body;
       }
@@ -1437,12 +1617,12 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       const ft = parseFuncTypeNode(list.children[2] as ListNode);
       const typeKey = registerFuncTypeIfNeeded(ft.params, ft.results, env);
       const letName2 = (list.children[1] as SymbolNode).name;
-      const val2 = codegenExpr(list.children[3], env, locals);
+      const val2 = codegenExpr(list.children[3], env, locals, false);
       const newLocals2 = copyLocals(locals);
       newLocals2.set(letName2, ":func:" + typeKey);
       let body2 = "(; let " + letName2 + " ;) " + watLocalSet(letName2, val2);
       for (let i = 4; i < list.children.length; i++) {
-        body2 += "\n    " + codegenExpr(list.children[i], env, newLocals2);
+        body2 += "\n    " + codegenExpr(list.children[i], env, newLocals2, emitTC && i == list.children.length - 1);
       }
       return body2;
     }
@@ -1458,7 +1638,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     if (typeAnnot == "") typeAnnot = typeOf(list.children[valIdx], env, locals);
     // ── :str binding — two WAT locals (ptr, len) ─────────────────────────────
     if (typeAnnot == ":str") {
-      const val = codegenExpr(list.children[valIdx], env, locals);
+      const val = codegenExpr(list.children[valIdx], env, locals, false);
       const newLocals = copyLocals(locals);
       newLocals.set(letName, ":str");
       newLocals.set(letName + "_ptr", ":i32");
@@ -1468,7 +1648,71 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       bodyStr += "\n    (local.set $" + letName + "_len)";
       bodyStr += "\n    (local.set $" + letName + "_ptr)";
       for (let i = valIdx + 1; i < list.children.length; i++) {
-        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
+      }
+      return bodyStr;
+    }
+    // ── :T[] binding — fat-pointer slice from an explicit expression ──────────
+    // (let buf :f64[] expr body...) — expr must produce two stack values (ptr, len)
+    if (isSliceType(typeAnnot) && !isAllocSliceType(typeAnnot)) {
+      const val = codegenExpr(list.children[valIdx], env, locals, false);
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, typeAnnot);
+      newLocals.set(letName + "_ptr", ":i32");
+      newLocals.set(letName + "_len", ":i32");
+      let bodyStr = "(; let " + letName + " ;) " + val;
+      bodyStr += "\n    (local.set $" + letName + "_len)";
+      bodyStr += "\n    (local.set $" + letName + "_ptr)";
+      for (let i = valIdx + 1; i < list.children.length; i++) {
+        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
+      }
+      return bodyStr;
+    }
+    // ── :T[N] binding — auto-allocate N elements, no explicit value ───────────
+    // (let buf :i32[16] body...) — compiler inserts alloc(16 * sizeof(:i32))
+    if (isAllocSliceType(typeAnnot)) {
+      const elemType = sliceElemType(typeAnnot);
+      const lb = typeAnnot.lastIndexOf("[");
+      const sizeStr = typeAnnot.slice(lb + 1, typeAnnot.length - 1);
+      const sizeWat = sliceAllocSizeWat(sizeStr, env);
+      const elemSize = env.sizeOf(elemType);
+      const byteWat = elemSize == 1
+        ? sizeWat
+        : "(i32.mul " + sizeWat + " (i32.const " + elemSize.toString() + "))";
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, typeAnnot);
+      newLocals.set(letName + "_ptr", ":i32");
+      newLocals.set(letName + "_len", ":i32");
+      // valIdx = 3 points to the first body expression (no explicit value in source)
+      let bodyStr = "(; let " + letName + " :T[N] ;) (call $alloc " + byteWat + ")";
+      bodyStr += "\n    (local.set $" + letName + "_ptr)";
+      bodyStr += "\n    " + sizeWat;
+      bodyStr += "\n    (local.set $" + letName + "_len)";
+      for (let i = valIdx; i < list.children.length; i++) {
+        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
+      }
+      return bodyStr;
+    }
+    // ── :*T[N] binding — alloc element buffer + 8-byte {ptr,len} header ──────
+    // (let hdr :*f32[4] body...) → hdr = alloc(8); header.ptr = alloc(4*4); header.len = 4
+    if (isPtrAllocSliceType(typeAnnot)) {
+      const elemType = ptrSliceElemType(typeAnnot);
+      const lb = typeAnnot.lastIndexOf("[");
+      const sizeStr = typeAnnot.slice(lb + 1, typeAnnot.length - 1);
+      const sizeWat = sliceAllocSizeWat(sizeStr, env);
+      const elemSize = env.sizeOf(elemType);
+      const byteWat = elemSize == 1
+        ? sizeWat
+        : "(i32.mul " + sizeWat + " (i32.const " + elemSize.toString() + "))";
+      const newLocals = copyLocals(locals);
+      newLocals.set(letName, typeAnnot);
+      // Allocate 8-byte header, store in local; then fill header.ptr and header.len
+      let bodyStr = "(; let " + letName + " :*T[N] ;) (call $alloc (i32.const 8))";
+      bodyStr += "\n    (local.set $" + letName + ")";
+      bodyStr += "\n    (i32.store (local.get $" + letName + ") (call $alloc " + byteWat + "))";
+      bodyStr += "\n    (i32.store (i32.add (local.get $" + letName + ") (i32.const 4)) " + sizeWat + ")";
+      for (let i = valIdx; i < list.children.length; i++) {
+        bodyStr += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
       }
       return bodyStr;
     }
@@ -1489,14 +1733,14 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
             (valList.children[0] as SymbolNode).name == vtN) {
           for (let fi = 0; fi < fnames.length; fi++) {
             if (fi > 0) bodyV += "\n    ";
-            bodyV += codegenExpr(valList.children[fi + 1], env, locals);
+            bodyV += codegenExpr(valList.children[fi + 1], env, locals, false);
           }
         } else {
           // Other expression (e.g. function returning :Point — already multi-value)
-          bodyV += codegenExpr(valNode, env, locals);
+          bodyV += codegenExpr(valNode, env, locals, false);
         }
       } else {
-        bodyV += codegenExpr(valNode, env, locals);
+        bodyV += codegenExpr(valNode, env, locals, false);
       }
       // Pop leaf field values in reverse (stack is LIFO; last leaf is on top)
       const leafLocals = valueTypeLeafLocals(letName, vtN, env);
@@ -1504,7 +1748,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         bodyV += "\n    (local.set $" + leafLocals[li] + ")";
       }
       for (let i = valIdx + 1; i < list.children.length; i++) {
-        bodyV += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        bodyV += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
       }
       return bodyV;
     }
@@ -1531,24 +1775,24 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
           }
         } else {
           // Non-constructor: treat result as already a pointer
-          bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals));
+          bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals, false));
         }
       } else {
-        bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals));
+        bodyR += watLocalSet(letName, codegenExpr(valNode, env, locals, false));
       }
       for (let i = valIdx + 1; i < list.children.length; i++) {
-        bodyR += "\n    " + codegenExpr(list.children[i], env, newLocals);
+        bodyR += "\n    " + codegenExpr(list.children[i], env, newLocals, emitTC && i == list.children.length - 1);
       }
       return bodyR;
     }
-    const val       = codegenExpr(list.children[valIdx], env, locals);
+    const val       = codegenExpr(list.children[valIdx], env, locals, false);
     const newLocalsS = copyLocals(locals);
     newLocalsS.set(letName, typeAnnot);
     // Build the body first so we can analyse it before deciding how to emit.
     let bodyS = "";
     for (let i = valIdx + 1; i < list.children.length; i++) {
       if (bodyS.length > 0) bodyS += "\n    ";
-      bodyS += codegenExpr(list.children[i], env, newLocalsS);
+      bodyS += codegenExpr(list.children[i], env, newLocalsS, emitTC && i == list.children.length - 1);
     }
     // ── Single-use inlining: if val is pure and the local is read exactly once
     // with no intervening set!, substitute the expression directly into the
@@ -1575,8 +1819,23 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     let out = "";
     for (let i = 1; i < list.children.length; i++) {
       if (i > 1) out += "\n    ";
-      out += codegenExpr(list.children[i], env, locals);
+      out += codegenExpr(list.children[i], env, locals, emitTC && i == list.children.length - 1);
     }
+    return out;
+  }
+
+  // ── (with-arena body...) — execute body in a push/pop arena scope ──────────
+  // arena-push saves heap-ptr; arena-pop restores it, freeing all arena allocs.
+  // The last body expression's value is returned (arena-pop is void — it uses
+  // only global.set instructions that don't touch the WAT value stack).
+  if (op == "with-arena") {
+    const addr = arenaStackAddr(env);
+    let out = emitArenaPushWat(addr);
+    for (let i = 1; i < list.children.length; i++) {
+      out += "\n    ";
+      out += codegenExpr(list.children[i], env, locals, emitTC && i == list.children.length - 1);
+    }
+    out += "\n    " + emitArenaPopWat(addr);
     return out;
   }
 
@@ -1586,7 +1845,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     let out = "";
     for (let i = 1; i < list.children.length; i++) {
       if (i > 1) out += "\n    ";
-      out += codegenExpr(list.children[i], env, locals);
+      out += codegenExpr(list.children[i], env, locals, false);
     }
     return out;
   }
@@ -1610,7 +1869,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
             const fnames = vtI.fieldNames;
             for (let fi = 0; fi < fnames.length; fi++) {
               if (out.length > 0) out += "\n    ";
-              const val = codegenExpr(rhsList.children[fi + 1], env, locals);
+              const val = codegenExpr(rhsList.children[fi + 1], env, locals, false);
               out += "(global.set $" + name + "_" + fnames[fi] + " " + val + ")";
             }
             return out;
@@ -1641,66 +1900,66 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
           }
         }
         // Non-constructor RHS: treat as already a pointer (i32)
-        return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals) + ")";
+        return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals, false) + ")";
       }
       // Primitive global
-      return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals) + ")";
+      return "(global.set $" + name + " " + codegenExpr(list.children[2], env, locals, false) + ")";
     }
-    return watLocalSet(name, codegenExpr(list.children[2], env, locals));
+    return watLocalSet(name, codegenExpr(list.children[2], env, locals, false));
   }
 
 
   // ── (i32.store ptr val) — raw memory write (void) ────────────────────────
   if (op == "i32.store") {
-    const ptr = codegenExpr(list.children[1], env, locals);
-    const val = codegenExpr(list.children[2], env, locals);
+    const ptr = codegenExpr(list.children[1], env, locals, false);
+    const val = codegenExpr(list.children[2], env, locals, false);
     return watI32Store(ptr, val);
   }
   // ── (i32.store8 ptr val) — single-byte write (void) ───────────
   if (op == "i32.store8") {
-    const ptr = codegenExpr(list.children[1], env, locals);
-    const val = codegenExpr(list.children[2], env, locals);
+    const ptr = codegenExpr(list.children[1], env, locals, false);
+    const val = codegenExpr(list.children[2], env, locals, false);
     return watI32Store8(ptr, val);
   }
 
   // ── (i32.load ptr) — 4-byte read → i32 ─────────────────────────
   if (op == "i32.load") {
-    return watI32Load(codegenExpr(list.children[1], env, locals));
+    return watI32Load(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (i32.load8_u ptr) — unsigned single-byte read ──────────────
   if (op == "i32.load8_u") {
-    return watI32Load8u(codegenExpr(list.children[1], env, locals));
+    return watI32Load8u(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (i32.load16_u ptr) — unsigned 2-byte read ───────────────────
   if (op == "i32.load16_u") {
-    return watI32Load16u(codegenExpr(list.children[1], env, locals));
+    return watI32Load16u(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (i64.load ptr) — 8-byte read → i64 ─────────────────────────
   if (op == "i64.load") {
-    return watI64Load(codegenExpr(list.children[1], env, locals));
+    return watI64Load(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (i64.store ptr val) — 8-byte write ──────────────────────────
   if (op == "i64.store") {
-    return watI64Store(codegenExpr(list.children[1], env, locals),
-                      codegenExpr(list.children[2], env, locals));
+    return watI64Store(codegenExpr(list.children[1], env, locals, false),
+                      codegenExpr(list.children[2], env, locals, false));
   }
   // ── (f32.load ptr) — 4-byte f32 read ────────────────────────────
   if (op == "f32.load") {
-    return watF32Load(codegenExpr(list.children[1], env, locals));
+    return watF32Load(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (f32.store ptr val) — 4-byte f32 write ──────────────────────
   if (op == "f32.store") {
-    return watF32Store(codegenExpr(list.children[1], env, locals),
-                      codegenExpr(list.children[2], env, locals));
+    return watF32Store(codegenExpr(list.children[1], env, locals, false),
+                      codegenExpr(list.children[2], env, locals, false));
   }
   // ── (f64.load ptr) — 8-byte f64 read ────────────────────────────
   if (op == "f64.load") {
-    return watF64Load(codegenExpr(list.children[1], env, locals));
+    return watF64Load(codegenExpr(list.children[1], env, locals, false));
   }
   // ── (f64.store ptr val) — 8-byte f64 write ──────────────────────
   if (op == "f64.store") {
-    return watF64Store(codegenExpr(list.children[1], env, locals),
-                      codegenExpr(list.children[2], env, locals));
+    return watF64Store(codegenExpr(list.children[1], env, locals, false),
+                      codegenExpr(list.children[2], env, locals, false));
   }
 
   // ── (array-ref :T data-ptr idx) — typed element load ─────────────────────
@@ -1708,8 +1967,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   // Emits: T.load(data-ptr + idx * sizeof(T))
   if (op == "array-ref") {
     const etype    = (list.children[1] as SymbolNode).name;
-    const dataPtr  = codegenExpr(list.children[2], env, locals);
-    const idx      = codegenExpr(list.children[3], env, locals);
+    const dataPtr  = codegenExpr(list.children[2], env, locals, false);
+    const idx      = codegenExpr(list.children[3], env, locals, false);
     const elemSize = env.sizeOf(etype);
     const addrExpr = elemSize <= 1
       ? "(i32.add " + dataPtr + " " + idx + ")"
@@ -1724,13 +1983,13 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
 
   // (v128.load ptr) → (v128.load expr)
   if (op == "v128.load") {
-    return "(v128.load " + codegenExpr(list.children[1], env, locals) + ")";
+    return "(v128.load " + codegenExpr(list.children[1], env, locals, false) + ")";
   }
 
   // (v128.store ptr val) → (v128.store expr expr)  void
   if (op == "v128.store") {
-    return "(v128.store " + codegenExpr(list.children[1], env, locals)
-                  + " " + codegenExpr(list.children[2], env, locals) + ")";
+    return "(v128.store " + codegenExpr(list.children[1], env, locals, false)
+                  + " " + codegenExpr(list.children[2], env, locals, false) + ")";
   }
 
   // (v128.const b0 b1 ... b15) → (v128.const i8x16 0 1 2 ...)
@@ -1738,7 +1997,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   if (op == "v128.const") {
     let out = "(v128.const i8x16";
     for (let i = 1; i < list.children.length; i++) {
-      const b = codegenExpr(list.children[i], env, locals);
+      const b = codegenExpr(list.children[i], env, locals, false);
       // Strip (i32.const N) down to just N for the immediate
       if (b.startsWith("(i32.const ") && b.endsWith(")")) {
         out += " " + b.slice(11, b.length - 1);
@@ -1759,7 +2018,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return ";; ERROR: " + op + ": lane index must be an integer literal";
     }
     const lane = (list.children[1] as IntNode).value;
-    const vec  = codegenExpr(list.children[2], env, locals);
+    const vec  = codegenExpr(list.children[2], env, locals, false);
     return "(" + op + " " + lane.toString() + " " + vec + ")";
   }
 
@@ -1769,7 +2028,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return ";; ERROR: extract_lane: lane index must be an integer literal";
     }
     const elLane = (list.children[1] as IntNode).value;
-    const elVec  = codegenExpr(list.children[2], env, locals);
+    const elVec  = codegenExpr(list.children[2], env, locals, false);
     const elType = typeOf(list.children[2], env, locals);
     let elOp: string;
     if (elType == ":i8x16")       elOp = op == "extract_lane_u" ? "i8x16.extract_lane_u" : "i8x16.extract_lane_s";
@@ -1789,8 +2048,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return ";; ERROR: " + op + ": lane index must be an integer literal";
     }
     const lane2 = (list.children[1] as IntNode).value;
-    const vec2  = codegenExpr(list.children[2], env, locals);
-    const val3  = codegenExpr(list.children[3], env, locals);
+    const vec2  = codegenExpr(list.children[2], env, locals, false);
+    const val3  = codegenExpr(list.children[3], env, locals, false);
     return "(" + op + " " + lane2.toString() + " " + vec2 + " " + val3 + ")";
   }
 
@@ -1800,8 +2059,8 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       return ";; ERROR: replace_lane: lane index must be an integer literal";
     }
     const rlLane = (list.children[1] as IntNode).value;
-    const rlVec  = codegenExpr(list.children[2], env, locals);
-    const rlVal  = codegenExpr(list.children[3], env, locals);
+    const rlVec  = codegenExpr(list.children[2], env, locals, false);
+    const rlVal  = codegenExpr(list.children[3], env, locals, false);
     const rlType = typeOf(list.children[2], env, locals);
     let rlOp: string;
     if (rlType == ":i8x16")       rlOp = "i8x16.replace_lane";
@@ -1823,17 +2082,17 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       }
       out += " " + (list.children[i] as IntNode).value.toString();
     }
-    out += " " + codegenExpr(list.children[17], env, locals);
-    out += " " + codegenExpr(list.children[18], env, locals);
+    out += " " + codegenExpr(list.children[17], env, locals, false);
+    out += " " + codegenExpr(list.children[18], env, locals, false);
     return out + ")";
   }
 
   // ── (array-set! :T data-ptr idx val) — typed element store ───────────────
   if (op == "array-set!") {
     const etype    = (list.children[1] as SymbolNode).name;
-    const dataPtr  = codegenExpr(list.children[2], env, locals);
-    const idx      = codegenExpr(list.children[3], env, locals);
-    const val2     = codegenExpr(list.children[4], env, locals);
+    const dataPtr  = codegenExpr(list.children[2], env, locals, false);
+    const idx      = codegenExpr(list.children[3], env, locals, false);
+    const val2     = codegenExpr(list.children[4], env, locals, false);
     const elemSize = env.sizeOf(etype);
     const addrExpr = elemSize <= 1
       ? "(i32.add " + dataPtr + " " + idx + ")"
@@ -1844,9 +2103,82 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     return watI32Store(addrExpr, val2);
   }
 
+  // ── Typed slice ops ──────────────────────────────────────────────────────
+  // (aref  buf idx)     — unchecked element read; buf must be a bare local name
+  // (aset! buf idx val) — unchecked element write
+  // (alen  buf)         — return the length stored in the slice's _len local
+  if (op == "aref" || op == "aset!" || op == "alen") {
+    const bufNode = list.children[1];
+    if (bufNode.tag != TAG_SYMBOL) {
+      return ";; ERROR: aref/aset!/alen: first argument must be a local variable name";
+    }
+    const bufName = (bufNode as SymbolNode).name;
+    const bufType = locals.has(bufName) ? locals.get(bufName)
+                  : (env.statics.has(bufName) ? env.statics.get(bufName).typeName : ":i32[]");
+    // For :*T[] / :*T[N] the element type strips the leading :*
+    const elemType = isPtrSliceType(bufType) ? ptrSliceElemType(bufType) : sliceElemType(bufType);
+    const elemSize = env.sizeOf(elemType);
+
+    if (op == "alen") {
+      // For defstatic :T[N], fold to compile-time constant N.
+      if (env.statics.has(bufName) && isAllocSliceType(env.statics.get(bufName).typeName)) {
+        const st = env.statics.get(bufName);
+        const slb = st.typeName.lastIndexOf("[");
+        const nStr = st.typeName.slice(slb + 1, st.typeName.length - 1);
+        return "(i32.const " + nStr + ")";
+      }
+      // :*T[N] — fold to compile-time constant if N is literal; otherwise load from header
+      if (isPtrAllocSliceType(bufType)) {
+        const slb = bufType.lastIndexOf("[");
+        const nStr = bufType.slice(slb + 1, bufType.length - 1);
+        // Check if N is a pure integer literal
+        let allDigits = nStr.length > 0;
+        for (let ci = 0; ci < nStr.length; ci++) {
+          const cc = nStr.charCodeAt(ci);
+          if (cc < 48 || cc > 57) { allDigits = false; break; }
+        }
+        if (allDigits) return "(i32.const " + nStr + ")";
+        // defconst or runtime expression — load from header+4
+      }
+      // :*T[] / :*T[N] (non-literal N) — load len from memory header at offset 4
+      if (isPtrSliceType(bufType)) {
+        return "(i32.load (i32.add (local.get $" + bufName + ") (i32.const 4)))";
+      }
+      return "(local.get $" + bufName + "_len)";
+    }
+
+    // Shared: compute element address from buf_ptr + idx * elemSize
+    const idx = codegenExpr(list.children[2], env, locals, false);
+    // For :*T[] the data pointer is loaded from header[0]; for :T[] it's a sub-local
+    const ptrExpr = isPtrSliceType(bufType)
+      ? "(i32.load (local.get $" + bufName + "))"
+      : env.statics.has(bufName)
+        ? "(i32.const " + env.statics.get(bufName).ptr.toString() + ")"
+        : "(local.get $" + bufName + "_ptr)";
+    const addrExpr = elemSize <= 1
+      ? "(i32.add " + ptrExpr + " " + idx + ")"
+      : "(i32.add " + ptrExpr + " (i32.mul " + idx + " (i32.const " + elemSize.toString() + ")))";
+
+    if (op == "aset!") {
+      const val2 = codegenExpr(list.children[3], env, locals, false);
+      if (elemType == ":i64") return watI64Store(addrExpr, val2);
+      if (elemType == ":f32") return watF32Store(addrExpr, val2);
+      if (elemType == ":f64") return watF64Store(addrExpr, val2);
+      if (elemType == ":u8")  return "(i32.store8 " + addrExpr + " " + val2 + ")";
+      return watI32Store(addrExpr, val2);
+    }
+    // aref — read value, or return address for struct element types
+    if (isValueTypeAnnot(elemType, env)) return addrExpr; // returns :*StructType slot address
+    if (elemType == ":i64") return "(i64.load " + addrExpr + ")";
+    if (elemType == ":f32") return "(f32.load " + addrExpr + ")";
+    if (elemType == ":f64") return "(f64.load " + addrExpr + ")";
+    if (elemType == ":u8")  return "(i32.load8_u " + addrExpr + ")";
+    return "(i32.load " + addrExpr + ")";
+  }
+
   // ── (drop expr) — discard a value (void) ──────────────────────────────────
   if (op == "drop") {
-    return watDrop(codegenExpr(list.children[1], env, locals));
+    return watDrop(codegenExpr(list.children[1], env, locals, false));
   }
 
   // ── Struct getter/setter or tuple-local accessor ──────────────────────────
@@ -1863,16 +2195,18 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     // :str fat-pointer accessor — access $varname_ptr or $varname_len directly.
     // Only applies when the argument is a true :str fat-pointer local (has _ptr sub-local).
     // :*str pointers use the hardcoded {ptr@0, len@4} layout below.
-    if (typeName == "str") {
+    // Also handles (slice/ptr buf) / (slice/len buf) for :T[] slice locals.
+    if (typeName == "str" || typeName == "slice") {
       const varNode = list.children[1];
       const varName = varNode.tag == TAG_SYMBOL ? (varNode as SymbolNode).name : "";
       if (locals.has(varName + "_ptr")) {
         if (isSetter) {
-          const val = codegenExpr(list.children[2], env, locals);
+          const val = codegenExpr(list.children[2], env, locals, false);
           return "(local.set $" + varName + "_" + field + " " + val + ")";
         }
         return "(local.get $" + varName + "_" + field + ")";
       }
+      if (typeName == "slice") return ";; ERROR: slice/ptr: " + varName + " has no _ptr sub-local";
       // Named :*str static used directly — fold to compile-time constants.
       // The header layout is {ptr@0 = bytesAddr, len@4 = length}.
       if (env.statics.has(varName) && env.statics.get(varName).typeName == ":*str") {
@@ -1881,9 +2215,9 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         if (field == "len") return "(i32.const " + info.len.toString() + ")";
       }
       // :*str pointer in a local — hardcoded layout {ptr@0, len@4}; no deftype required.
-      const ptrExpr = codegenExpr(list.children[1], env, locals);
+      const ptrExpr = codegenExpr(list.children[1], env, locals, false);
       if (isSetter) {
-        const val = codegenExpr(list.children[2], env, locals);
+        const val = codegenExpr(list.children[2], env, locals, false);
         if (field == "ptr") return "(i32.store " + ptrExpr + " " + val + ")";
         if (field == "len") return "(i32.store (i32.add " + ptrExpr + " (i32.const 4)) " + val + ")";
       }
@@ -1910,7 +2244,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
         }
         // Scalar or pointer field
         if (isSetter) {
-          const val = codegenExpr(list.children[2], env, locals);
+          const val = codegenExpr(list.children[2], env, locals, false);
           return "(local.set $" + varName + "_" + field + " " + val + ")";
         }
         return "(local.get $" + varName + "_" + field + ")";
@@ -1919,15 +2253,15 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
       if (env.globals.has(varName) && env.globals.get(varName).isValueType &&
           env.globals.get(varName).typeName == ":" + typeName) {
         if (isSetter) {
-          const val = codegenExpr(list.children[2], env, locals);
+          const val = codegenExpr(list.children[2], env, locals, false);
           return "(global.set $" + varName + "_" + field + " " + val + ")";
         }
         return "(global.get $" + varName + "_" + field + ")";
       }
     }
-    const ptr      = codegenExpr(list.children[1], env, locals);
+    const ptr      = codegenExpr(list.children[1], env, locals, false);
     if (isSetter) {
-      const val = codegenExpr(list.children[2], env, locals);
+      const val = codegenExpr(list.children[2], env, locals, false);
       return expandFieldSet(typeName, field, ptr, val, env);
     }
     return expandFieldGet(typeName, field, ptr, env);
@@ -1942,9 +2276,10 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   // ── Calling a function-typed local via call_indirect ──────────────────────
   if (locals.has(op) && locals.get(op).startsWith(":func:")) {
     const typeKey = locals.get(op).slice(6);
-    let out = "(call_indirect (type $" + typeKey + ")";
+    const callOp = emitTC ? "return_call_indirect" : "call_indirect";
+    let out = "(" + callOp + " (type $" + typeKey + ")";
     for (let i = 1; i < list.children.length; i++) {
-      out += " " + codegenExpr(list.children[i], env, locals);
+      out += " " + codegenExpr(list.children[i], env, locals, false);
     }
     out += " " + watLocalGet(op) + ")";
     return out;
@@ -1957,7 +2292,7 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
     let out = "";
     for (let i = 1; i < list.children.length; i++) {
       if (i > 1) out += "\n    ";
-      out += codegenExpr(list.children[i], env, locals);
+      out += codegenExpr(list.children[i], env, locals, false);
     }
     return out;
   }
@@ -1965,9 +2300,15 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>): str
   // ── (call name args...) or implicit call (name args...) ───────────────────
   const args = new Array<string>();
   for (let i = 1; i < list.children.length; i++) {
-    args.push(codegenExpr(list.children[i], env, locals));
+    args.push(codegenExpr(list.children[i], env, locals, false));
   }
-  return watCall(op, args);
+  let knownFunc = false;
+  for (let i = 0; i < env.imports.length; i++) {
+    if (env.imports[i].localName == op) { knownFunc = true; break; }
+  }
+  if (!knownFunc && (env.funcBodies.has(op) || env.funcResultTypes.has(op))) knownFunc = true;
+  if (!knownFunc) env.errors.push("undefined function '" + op + "'");
+  return emitTC ? watReturnCall(op, args) : watCall(op, args);
 }
 
 // ─── Helpers for single-use let inlining ─────────────────────────────────────

@@ -1,0 +1,33 @@
+;; Test: (with-arena body...) — scoped arena allocation
+(include io)
+(include memory)
+
+(defn main () :i32
+  (let base :i32 heap-ptr
+
+    ;; with-arena frees its allocations on exit
+    (with-arena
+      (let buf :i32[8])
+      (aset! buf 0 99))
+    (assert (= heap-ptr base) "with-arena freed allocation")
+
+    ;; with-arena returns the value of its last expression
+    (let result :i32
+      (with-arena
+        (let tmp :i32[4])
+        (aset! tmp 0 42)
+        (aref tmp 0)))
+    (assert (= result 42) "with-arena returns last value")
+    (assert (= heap-ptr base) "heap restored after value-returning with-arena")
+
+    ;; nested with-arena
+    (with-arena
+      (let outer :i32[4])
+      (let after-outer :i32 heap-ptr)
+      (with-arena
+        (let inner :i32[4])
+        (assert (> heap-ptr after-outer) "inner alloc on top of outer"))
+      (assert (= heap-ptr after-outer) "inner arena freed"))
+    (assert (= heap-ptr base) "outer arena freed")
+
+    0))

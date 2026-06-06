@@ -11,29 +11,29 @@
 (include simd)
 
 (defn test-add-sub (a :i32x4 b :i32x4) :void
-  (let c :i32x4 (+ a b)
-    (let d :i32x4 (- a b)
-      (printf "add: %d %d %d %d\n"
-        (extract_lane 0 c) (extract_lane 1 c)
-        (extract_lane 2 c) (extract_lane 3 c))
-      (printf "sub: %d %d %d %d\n"
-        (extract_lane 0 d) (extract_lane 1 d)
-        (extract_lane 2 d) (extract_lane 3 d)))))
+  (let* ((c :i32x4 (+ a b))
+         (d :i32x4 (- a b)))
+    (printf "add: %d %d %d %d\n"
+      (extract_lane 0 c) (extract_lane 1 c)
+      (extract_lane 2 c) (extract_lane 3 c))
+    (printf "sub: %d %d %d %d\n"
+      (extract_lane 0 d) (extract_lane 1 d)
+      (extract_lane 2 d) (extract_lane 3 d))))
 
 (defn test-mul-splat (a :i32x4 b :i32x4) :void
-  (let e :i32x4 (* a b)
-    (let s :i32x4 (i32x4-splat 7)
-      (printf "mul: %d %d %d %d\n"
-        (extract_lane 0 e) (extract_lane 1 e)
-        (extract_lane 2 e) (extract_lane 3 e))
-      (printf "splat: %d\n" (extract_lane 0 s))
-      (let r :i32x4 (replace_lane 1 s 99)
-        (printf "replace: %d %d %d %d\n"
-          (extract_lane 0 r) (extract_lane 1 r)
-          (extract_lane 2 r) (extract_lane 3 r))))))
+  (let* ((e :i32x4 (* a b))
+         (s :i32x4 (i32x4-splat 7))
+         (r :i32x4 (replace_lane 1 s 99)))
+    (printf "mul: %d %d %d %d\n"
+      (extract_lane 0 e) (extract_lane 1 e)
+      (extract_lane 2 e) (extract_lane 3 e))
+    (printf "splat: %d\n" (extract_lane 0 s))
+    (printf "replace: %d %d %d %d\n"
+      (extract_lane 0 r) (extract_lane 1 r)
+      (extract_lane 2 r) (extract_lane 3 r))))
 
 (defn main () :void
-  (let a :i32x4 10:20:30:40i32x4
-    (let b :i32x4 1:2:3:4i32x4
-      (test-add-sub a b)
-      (test-mul-splat a b))))
+  (let* ((a :i32x4 10:20:30:40i32x4)
+         (b :i32x4 1:2:3:4i32x4))
+    (test-add-sub a b)
+    (test-mul-splat a b)))

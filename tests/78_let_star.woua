@@ -1,0 +1,11 @@
+;; @test let-star
+;; @feature let* sequential bindings: each binding is in scope for subsequent ones
+;; @expect 8
+
+(include io)
+
+(defn main ()
+  (let* ((a 1)
+         (b (+ a 2))
+         (c (+ a b)))
+    (printf "%d\n" (* c 2))))

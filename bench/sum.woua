@@ -7,13 +7,13 @@
 (include time)
 
 (defn main () :void
-  (let start :i64 (time-now-ns)
-    (let sum :i64 0i64
-      (let i :i64 0i64
-        (while (< i 100000000i64)
-          (set! sum (^ sum (* i i)))
-          (set! i (+ i 1i64)))
-        (let elapsed :i64 (- (time-now-ns) start)
-(printf "sum = %ld, time = %ld ms\n"
-            sum
-            (/ elapsed 1000000i64)))))))
+  (let* ((start :i64 (time-now-ns))
+         (sum   :i64 0i64)
+         (i     :i64 0i64))
+    (while (< i 100000000i64)
+      (set! sum (^ sum (* i i)))
+      (set! i (+ i 1i64)))
+    (let elapsed :i64 (- (time-now-ns) start)
+      (printf "sum = %ld, time = %ld ms\n"
+        sum
+        (/ elapsed 1000000i64)))))

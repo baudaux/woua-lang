@@ -1,0 +1,30 @@
+;; @test ptr-slice-cast
+;; @feature (as :T[] ptr) casts a :*T[] pointer-to-header to a fat-pointer slice
+;; @expect
+;;   sum=10.000000
+;;   len=4
+;;   hdr[2]=3.000000
+
+(include io)
+(include memory)
+
+(defn sum-slice (xs :f32[]) :f32
+    (let* ((s :f32 0.0)
+           (i :i32 0))
+        (while (< i (alen xs))
+            (set! s (+ s xs[i]))
+            (set! i (+ i 1)))
+        s))
+
+(defn main ()
+    ;; :*f32[4] allocates an 8-byte {ptr,len} header + element buffer automatically.
+    (let hdr :*f32[4]
+        (let xs :f32[] (as :f32[] hdr)
+            (aset! xs 0 1.0)
+            (aset! xs 1 2.0)
+            (aset! xs 2 3.0)
+            (aset! xs 3 4.0)
+            ;; alen and aref work directly on the :*f32[4] local
+            (printf "sum=%f\n" (sum-slice xs))
+            (printf "len=%d\n" (alen hdr))
+            (printf "hdr[2]=%f\n" (aref hdr 2)))))

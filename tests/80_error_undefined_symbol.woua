@@ -1,0 +1,4 @@
+;; @expect-error
+
+(defn main () :void
+  (undefined-symbol))

@@ -1,0 +1,35 @@
+;; @test sprintf
+;; @feature (sprintf buf "fmt" args...) — write formatted string into a buffer
+;; @expect
+;;   hello world
+;;   x=42 y=-7
+;;   pi=3.141593
+;;   bytes=11
+(include io)
+(include memory)
+
+(defn main () :i32
+  ;; alloc gives a raw :ptr — right type for sprintf
+  (let buf :ptr (alloc 256))
+
+  ;; basic string
+  (let n1 :i32 (sprintf buf "hello world"))
+  (write 1 buf n1)
+  (printf "\n")
+
+  ;; integers
+  (let n2 :i32 (sprintf buf "x=%d y=%d" 42 -7))
+  (write 1 buf n2)
+  (printf "\n")
+
+  ;; float
+  (let n3 :i32 (sprintf buf "pi=%f" 3.141593))
+  (write 1 buf n3)
+  (printf "\n")
+
+  ;; check return value
+  (let n4 :i32 (sprintf buf "hello world"))
+  (assert (= n4 11) "sprintf returns byte count")  ;; 11 bytes in "hello world"
+  (printf "bytes=%d\n" n4)
+
+  0)

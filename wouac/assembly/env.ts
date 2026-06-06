@@ -224,6 +224,13 @@ export class Env {
   // ── Errors accumulated during compilation ────────────────────────────────
   errors: Array<string> = new Array<string>();
 
+  // ── Fresh name counter — for generating unique temporaries ───────────────
+  freshCounter: i32 = 0;
+  freshName(prefix: string): string {
+    const n = this.freshCounter++;
+    return prefix + n.toString();
+  }
+
   // ── Compiler options ─────────────────────────────────────────────────────
   noPeephole: bool = false;  usesSvg:    bool = false;  // true when lib/svg.woua is included → emit shared memory
   // ── Alignment helpers ────────────────────────────────────────────────────────
@@ -235,7 +242,9 @@ export class Env {
     if (typeName == ":v128" || typeName == ":i8x16" || typeName == ":i16x8" ||
         typeName == ":i32x4" || typeName == ":i64x2" ||
         typeName == ":f32x4" || typeName == ":f64x2")                     return 16;
-    if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
+    if (typeName.startsWith(":*")) return 4; // ref-type pointer or heap-slice pointer
+    // :T[] and :T[N] — fat-pointer slice (two i32s), aligned to 4
+    if (typeName.startsWith(":") && typeName.indexOf("[") > 0)           return 4;
     // Embedded struct: align to first field
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1))) {
       const ti = this.types.get(typeName.slice(1));
@@ -252,7 +261,9 @@ export class Env {
     if (typeName == ":v128" || typeName == ":i8x16" || typeName == ":i16x8" ||
         typeName == ":i32x4" || typeName == ":i64x2" ||
         typeName == ":f32x4" || typeName == ":f64x2")                     return 16;
-    if (typeName.startsWith(":*")) return 4; // ref-type field = pointer
+    if (typeName.startsWith(":*")) return 4; // ref-type pointer or :*T[] heap-slice pointer
+    // :T[] and :T[N] — fat-pointer slice stored as two WAT locals = 8 bytes
+    if (typeName.startsWith(":") && typeName.indexOf("[") > 0)           return 8;
     // Embedded struct: size from env.types
     if (typeName.startsWith(":") && this.types.has(typeName.slice(1)))
       return this.types.get(typeName.slice(1)).size;

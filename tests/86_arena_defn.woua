@@ -1,0 +1,29 @@
+;; Test: (defn name () :arena ...) — per-function auto arena scope
+(include io)
+(include memory)
+
+;; Void :arena function — allocations freed automatically on return
+(defn scratch () :void :arena
+  (let buf :i32[64])
+  (aset! buf 0 7)
+  (assert (= (aref buf 0) 7) "arena defn: buf readable inside fn"))
+
+;; :arena function returning a scalar — value escapes, allocation freed
+(defn compute () :i32 :arena
+  (let tmp :i32[4])
+  (aset! tmp 0 123)
+  (aref tmp 0))
+
+(defn main () :i32
+  (let base :i32 heap-ptr
+
+    ;; scratch() allocates inside an arena, returns, heap restored
+    (scratch)
+    (assert (= heap-ptr base) "heap restored after :arena void fn")
+
+    ;; compute() returns a scalar value, arena freed
+    (let v :i32 (compute))
+    (assert (= v 123) ":arena fn returned correct value")
+    (assert (= heap-ptr base) "heap restored after :arena fn with return value")
+
+    0))

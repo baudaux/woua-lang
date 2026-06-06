@@ -14,17 +14,17 @@
 (include simd)
 
 (defn main () :void
-  (let a :i32x4 4:8:16:32i32x4
-    (let sl :i32x4 (shl a 1)
-      (let sr :i32x4 (shr_u a 1)
-        (let neg :i32x4 -8:-16:-32:-64i32x4
-          (let sa :i32x4 (shr_s neg 1)
-            (printf "shl: %d %d %d %d\n"
-              (extract_lane 0 sl) (extract_lane 1 sl)
-              (extract_lane 2 sl) (extract_lane 3 sl))
-            (printf "shr_u: %d %d %d %d\n"
-              (extract_lane 0 sr) (extract_lane 1 sr)
-              (extract_lane 2 sr) (extract_lane 3 sr))
-            (printf "shr_s: %d %d %d %d\n"
-              (extract_lane 0 sa) (extract_lane 1 sa)
-              (extract_lane 2 sa) (extract_lane 3 sa))))))))
+  (let* ((a :i32x4 4:8:16:32i32x4)
+         (sl :i32x4 (shl a 1))
+         (sr :i32x4 (shr_u a 1))
+         (neg :i32x4 -8:-16:-32:-64i32x4)
+         (sa :i32x4 (shr_s neg 1)))
+    (printf "shl: %d %d %d %d\n"
+      (extract_lane 0 sl) (extract_lane 1 sl)
+      (extract_lane 2 sl) (extract_lane 3 sl))
+    (printf "shr_u: %d %d %d %d\n"
+      (extract_lane 0 sr) (extract_lane 1 sr)
+      (extract_lane 2 sr) (extract_lane 3 sr))
+    (printf "shr_s: %d %d %d %d\n"
+      (extract_lane 0 sa) (extract_lane 1 sa)
+      (extract_lane 2 sa) (extract_lane 3 sa))))

@@ -14,29 +14,29 @@
 ;; Compute the dot product of f32 arrays a[] and b[] (each DOT-N elements)
 ;; using 4-wide SIMD. Returns the scalar f32 result.
 (defn simd-dot (a :ptr b :ptr) :f32
-  (let acc :f32x4 (f32x4-splat 0.0)
-    (let i :i32 0
-      (while (< i DOT-BYTES)
-        (let va :f32x4 (v128.load (+ a i))
-          (let vb :f32x4 (v128.load (+ b i))
-            (set! acc (+ acc (* va vb)))))
-        (set! i (+ i 16)))
-      ;; Horizontal sum: dot(acc, 1111) = sum of all 4 lanes
-      (f32x4.dot-product acc (f32x4-splat 1.0)))))
+  (let* ((acc :f32x4 (f32x4-splat 0.0))
+         (i   :i32 0))
+    (while (< i DOT-BYTES)
+      (let* ((va :f32x4 (v128.load (+ a i)))
+             (vb :f32x4 (v128.load (+ b i))))
+        (set! acc (+ acc (* va vb))))
+      (set! i (+ i 16)))
+    ;; Horizontal sum: dot(acc, 1111) = sum of all 4 lanes
+    (f32x4.dot-product acc (f32x4-splat 1.0))))
 
 (defn main () :void
-  (let a :ptr (alloc DOT-BYTES)
-    (let b :ptr (alloc DOT-BYTES)
-      ;; a[k] = (float)(k+1),  b[k] = 1.0  → dot = 1+2+...+1024 = 524800
-      (for di 0 DOT-N
-        (f32.store (+ a (* di 4)) (as :f32 (+ di 1)))
-        (f32.store (+ b (* di 4)) 1.0))
-      (let start :i64 (time-now-ns)
-        (let dot :f32 0.0
-          (for dr 0 DOT-REPS
-            (set! dot (simd-dot a b)))
-          (let elapsed :i64 (- (time-now-ns) start)
-            (printf "simd_dot N=%d reps=%d dot=%d, time = %ld ms\n"
-              DOT-N DOT-REPS
-              (as :i32 dot)
-              (/ elapsed 1000000i64))))))))
+  (let* ((a :ptr (alloc DOT-BYTES))
+         (b :ptr (alloc DOT-BYTES)))
+    ;; a[k] = (float)(k+1),  b[k] = 1.0  → dot = 1+2+...+1024 = 524800
+    (for di 0 DOT-N
+      (f32.store (+ a (* di 4)) (as :f32 (+ di 1)))
+      (f32.store (+ b (* di 4)) 1.0))
+    (let* ((start :i64 (time-now-ns))
+           (dot   :f32 0.0))
+      (for dr 0 DOT-REPS
+        (set! dot (simd-dot a b)))
+      (let elapsed :i64 (- (time-now-ns) start)
+        (printf "simd_dot N=%d reps=%d dot=%d, time = %ld ms\n"
+          DOT-N DOT-REPS
+          (as :i32 dot)
+          (/ elapsed 1000000i64))))))

@@ -1,0 +1,16 @@
+;; @test tail-call
+;; @feature TCO: tail-recursive function emits return_call, no stack overflow
+;; @expect 500000500000
+;; @expect-wat (return_call $sum-iter
+
+(include io)
+
+;; Tail-recursive sum: sum-iter n acc
+;; With TCO this runs in O(1) stack space.
+(defn sum-iter (n :i64 acc :i64) :i64
+  (if (= n 0i64)
+    acc
+    (sum-iter (- n 1i64) (+ acc n))))
+
+(defn main ()
+  (printf "%ld\n" (sum-iter 1000000i64 0i64)))

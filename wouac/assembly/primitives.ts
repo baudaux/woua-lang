@@ -129,6 +129,14 @@ export function watCall(name: string, args: Array<string>): string {
   return result + ")";
 }
 
+export function watReturnCall(name: string, args: Array<string>): string {
+  let result = "(return_call $" + name;
+  for (let i = 0; i < args.length; i++) {
+    result += " " + args[i];
+  }
+  return result + ")";
+}
+
 export function watDrop(expr: string): string {
   return "(drop " + expr + ")";
 }
