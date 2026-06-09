@@ -1,0 +1,38 @@
+;; @test strfmt
+;; @feature (strfmt "fmt" args...) — formatted string, returns :str with exact allocation
+;; @expect
+;;   cell3
+;;   hsl(120,65%,52%)
+;;   frame: -1
+;;   hello world
+;;   x=42 pi=3.141593
+(include io)
+(include string)
+
+(defn main () :i32
+  ;; %d with prefix
+  (let s1 :str (strfmt "cell%d" 3))
+  (write 1 (str/ptr s1) (str/len s1))
+  (printf "\n")
+
+  ;; multiple segments and %d
+  (let s2 :str (strfmt "hsl(%d,65%%,52%%)" 120))
+  (write 1 (str/ptr s2) (str/len s2))
+  (printf "\n")
+
+  ;; negative i32
+  (let s3 :str (strfmt "frame: %d" -1))
+  (write 1 (str/ptr s3) (str/len s3))
+  (printf "\n")
+
+  ;; literal only (no args)
+  (let s4 :str (strfmt "hello world"))
+  (write 1 (str/ptr s4) (str/len s4))
+  (printf "\n")
+
+  ;; mixed i32 and f32
+  (let s5 :str (strfmt "x=%d pi=%f" 42 3.141593))
+  (write 1 (str/ptr s5) (str/len s5))
+  (printf "\n")
+
+  0)

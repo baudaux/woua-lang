@@ -2214,6 +2214,14 @@ function codegenList(list: ListNode, env: Env, locals: Map<string, string>, emit
         if (field == "ptr") return "(i32.const " + (info.ptr + 8).toString() + ")";
         if (field == "len") return "(i32.const " + info.len.toString() + ")";
       }
+      // Interned string literal (__str:xxx, typeName ":strlit") — ptr IS the char bytes address.
+      // Must handle before the generic ptrExpr path, because codegenExpr of a :strlit symbol
+      // expands to two values (ptr, len) which would produce invalid i32.load operands.
+      if (env.statics.has(varName) && env.statics.get(varName).typeName == ":strlit") {
+        const info = env.statics.get(varName);
+        if (field == "ptr") return "(i32.const " + info.ptr.toString() + ")";
+        if (field == "len") return "(i32.const " + info.len.toString() + ")";
+      }
       // :*str pointer in a local — hardcoded layout {ptr@0, len@4}; no deftype required.
       const ptrExpr = codegenExpr(list.children[1], env, locals, false);
       if (isSetter) {

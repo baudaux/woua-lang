@@ -1,0 +1,102 @@
+;; dom_demo.woua — HTML app demo using lib/dom.woua + /dev/dom device
+;;
+;; Renders a live counter dashboard directly into the browser DOM.
+;; Nine counter cells update at different rates, showing the upsert-by-id
+;; mechanism: elements are created once, then only their text is updated
+;; each frame without touching the DOM structure or styles.
+;;
+;; Browser setup (worker-based):
+;;   import { makeDomProcessor } from '../js/dom-processor.js';
+;;   const worker = new Worker('./dom_worker.js', { type: 'module' });
+;;   const process = makeDomProcessor(document.getElementById('app'));
+;;   worker.onmessage = ({ data }) => {
+;;     if (data.type === 'dom') process(data.line);
+;;   };
+;;   worker.postMessage({ type: 'start', wasmUrl: 'out/dom_demo.wasm' });
+
+(include html)
+(include svg)
+
+;; Frame delay: 80 ms ≈ 12 fps
+(defconst FRAME-NS 80000000)
+
+;; Number of counter cells in the 3×3 grid
+(defconst NCELLS 9)
+
+(defn make-cell (i :i32) :void
+  (span (strfmt "cell%d" i) "0"
+        (style (strfmt "display:block;padding:22px 0;text-align:center;font-size:1.7rem;font-family:monospace;font-weight:bold;color:#fff;border-radius:8px;background:hsl(%d,65%%,52%%)" (* i 40)))))
+
+(defn main ()
+  (let* ((dom-fd :i32     (open-file "/dev/dom" 0))
+         (buf    :*DomBuf  (dom-buf-new 8192))
+         (sbuf   :*SvgBuf  (svg-buf-new 2048))
+         (frame  :i32      0)
+         (vals   :i32[NCELLS]))
+
+    ;; ── Build initial layout using the html macro ─────────────────────────────
+
+    (html buf dom-fd
+      (div "app" (style "font-family:sans-serif;max-width:480px;padding:1.25rem;")
+        (h1 "title" "woua DOM demo"
+            (style "margin:0 0 0.2rem;color:#2c3e50;font-size:1.6rem;"))
+        (p "subtitle" "Live counter board — running in WebAssembly"
+           (style "margin:0 0 1rem;color:#7f8c8d;font-size:0.9rem;"))
+        (div "grid"
+             (style "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:1rem;")
+          (for i 0 NCELLS
+            (make-cell i)))))
+
+    ;; SVG bar chart — manually added after the html flush.
+    ;; dom-parent re-scopes into app; dom-svg creates the container;
+    ;; dom-parent chart + dom-flush-to lets the processor see the SVG parent
+    ;; before the svg-rect commands arrive.
+    (dom-parent buf "app")
+    (dom-svg buf "chart" 460 100)
+    (dom-style buf "chart" "display:block;margin-bottom:0.5rem;border-radius:6px;background:#f8f8f8;")
+    (dom-parent buf "chart")
+    (dom-flush-to buf dom-fd)
+
+    ;; Create 9 bars via lib/svg.woua — SvgBuf flushed to the same dom-fd.
+    ;; x[i] = 10 + i*50, initial height = 4 (grows upward from y=96)
+    (for i 0 NCELLS
+      (svg-rect sbuf
+        (strfmt "bar%d" i)
+        (+ 10 (* i 50)) 96 40 4
+        (strfmt "hsl(%d,65%%,52%%)" (* i 40))))
+    (svg-flush-to sbuf dom-fd)
+
+    ;; Status bar
+    (dom-parent buf "app")
+    (dom-p buf "status" "Frame: 0")
+    (dom-style buf "status" "margin:0;color:#aaa;font-size:0.78rem;font-family:monospace;")
+    (dom-flush-to buf dom-fd)
+
+    ;; ── Animation loop ────────────────────────────────────────────────
+    (while 1
+      (poll-sleep-ns (as :i64 FRAME-NS))
+      (set! frame (+ frame 1))
+
+      ;; Increment each counter by its index + 1
+      (for i 0 NCELLS
+        (aset! vals i (+ vals[i] (+ i 1))))
+
+      ;; Update cell text only — no DOM structure or style changes
+      (for i 0 NCELLS
+        (dom-text buf
+          (strfmt "cell%d" i)
+          (i32->str vals[i])))
+
+      ;; Update bar heights — cycle 0-79 using modulo
+      (for i 0 NCELLS
+        (let h :i32 (+ (% vals[i] 80) 4)
+          (svg-rect sbuf
+            (strfmt "bar%d" i)
+            (+ 10 (* i 50)) (- 100 h) 40 h
+            (strfmt "hsl(%d,65%%,52%%)" (* i 40)))))
+
+      ;; Update frame counter
+      (dom-text buf "status" (strfmt "Frame: %d" frame))
+
+      (dom-flush-to buf dom-fd)
+      (svg-flush-to sbuf dom-fd))))

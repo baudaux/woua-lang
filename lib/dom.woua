@@ -1,0 +1,342 @@
+;; DOM rendering library — write HTML DOM commands to the /dev/dom virtual device.
+;;
+;; The JS bridge (js/dom-bridge.js) advertises a virtual '/dev' preopened
+;; directory (fd 3).  Programs open '/dev/dom' via (open-file "/dev/dom" 0),
+;; receive a dynamically allocated fd, and write protocol messages to it with
+;; (dom-flush-to buf fd).  The bridge intercepts those fd_write calls and
+;; upserts elements into a live HTML container element by element id.
+;;
+;; Protocol (newline-terminated messages written to the dom fd):
+;;   <tag id="ID" attr="val" .../>\n         — upsert self-closing element
+;;   <tag id="ID" ...>TEXT</tag>\n           — upsert element with text content
+;;   <!remove ID>\n                           — remove element by id
+;;   <!clear>\n                               — remove all children from root container
+;;   <!parent ID>\n                           — set insertion parent to element ID
+;;   <!parent-root>\n                         — reset insertion parent to root container
+;;   <!style ID CSS>\n                        — set style attribute on element ID
+;;   <!class ID CLASSNAME>\n                  — set className on element ID
+;;   <!text ID TEXT>\n                        — set textContent on element ID
+;;   <!attr ID NAME VALUE>\n                  — set arbitrary attribute on element ID
+;;
+;; The special id "__root" in directives refers to the root container element.
+;;
+;; Usage:
+;;   (include dom)
+;;   (let dom-fd :i32 (open-file "/dev/dom" 0)
+;;     (let buf :*DomBuf (dom-buf-new 4096)
+;;       (dom-h1 buf "title" "Hello")
+;;       (dom-flush-to buf dom-fd)))
+
+;; Declare linear memory as shared — the DOM bridge runs WASM in a Web Worker
+;; and reads the memory from the main thread via SharedArrayBuffer.
+(shared-memory)
+
+(include io)
+
+;; ── DomBuf ───────────────────────────────────────────────────────────────────
+;; A dynamically-growing byte buffer for building DOM protocol messages.
+;; Fields:
+;;   ptr  — pointer to the backing allocation
+;;   len  — number of bytes currently written
+;;   cap  — total capacity in bytes
+(deftype DomBuf
+  (ptr :ptr)
+  (len :i32)
+  (cap :i32))
+
+;; (dom-buf-new cap) → :*DomBuf
+(defn dom-buf-new (cap) :*DomBuf
+  (let buf :*DomBuf (alloc (sizeof DomBuf))
+    (DomBuf/ptr! buf (alloc cap))
+    (DomBuf/len! buf 0)
+    (DomBuf/cap! buf cap)
+    buf))
+
+;; (dom-buf-reset buf) — reset the write cursor to the start.
+(defmacro dom-buf-reset (buf)
+  (DomBuf/len! buf 0))
+
+;; Internal: grow buf so it can hold at least (len + needed) bytes.
+;; Doubles the capacity until large enough, copies existing content.
+(defn __dom-ensure (buf :*DomBuf needed :i32)
+  (let old-cap :i32 (DomBuf/cap buf)
+    (let required :i32 (+ (DomBuf/len buf) needed)
+      (if (> required old-cap)
+        (let new-cap :i32 (* old-cap 2)
+          (if (< new-cap required)
+            (set! new-cap required))
+          (let old-ptr :ptr (DomBuf/ptr buf)
+            (let new-ptr :ptr (alloc new-cap)
+              (let i :i32 0
+                (while (< i (DomBuf/len buf))
+                  (i32.store8 (+ new-ptr i) (i32.load8_u (+ old-ptr i)))
+                  (set! i (+ i 1))))
+              (DomBuf/ptr! buf new-ptr)
+              (DomBuf/cap! buf new-cap))))))))
+
+;; Internal: append a single byte to buf.
+(defmacro __dom-byte (buf b)
+  (progn
+    (__dom-ensure buf 1)
+    (let __p :ptr (DomBuf/ptr buf)
+      (let __l :i32 (DomBuf/len buf)
+        (i32.store8 (+ __p __l) b)
+        (DomBuf/len! buf (+ __l 1))))))
+
+;; Internal: append all bytes of str s to buf.
+(defn __dom-str (buf :*DomBuf s :str)
+  (__dom-ensure buf (str/len s))
+  (let p  :ptr (str/ptr s)
+    (let n  :i32 (str/len s)
+      (let bp :ptr (DomBuf/ptr buf)
+        (let l  :i32 (DomBuf/len buf)
+          (let i  :i32 0
+            (while (< i n)
+              (i32.store8 (+ bp (+ l i)) (i32.load8_u (+ p i)))
+              (set! i (+ i 1))))
+          (DomBuf/len! buf (+ l n)))))))
+
+;; Internal: append decimal digits of i32 n to buf.
+(defmacro __dom-int (buf n)
+  (__dom-str buf (i32->str n)))
+
+;; (dom-flush-to buf fd) — write buffer contents to fd and reset.
+;; Use the fd returned by (open-file "/dev/dom" 0) for the DOM bridge,
+;; or STDOUT for CLI testing: (dom-flush-to buf STDOUT) > out.html
+(defmacro dom-flush-to (buf fd)
+  (progn
+    (write fd (DomBuf/ptr buf) (DomBuf/len buf))
+    (dom-buf-reset buf)))
+
+;; Internal: open a tag and write id attr: <TAG id="ID"
+(defmacro __dom-open-tag (buf tag id)
+  (progn
+    (__dom-byte buf 60)        ;; <
+    (__dom-str buf tag)
+    (__dom-str buf " id=\"")
+    (__dom-str buf id)
+    (__dom-byte buf 34)))      ;; "
+
+;; Internal: close a self-closing tag with />\n
+(defmacro __dom-close-self (buf)
+  (progn
+    (__dom-byte buf 47)        ;; /
+    (__dom-byte buf 62)        ;; >
+    (__dom-byte buf 10)))      ;; \n
+
+;; Internal: write a closing tag </TAG>\n
+(defmacro __dom-close-tag (buf tag)
+  (progn
+    (__dom-str buf "</")
+    (__dom-str buf tag)
+    (__dom-byte buf 62)        ;; >
+    (__dom-byte buf 10)))      ;; \n
+
+;; Internal: write attr="val" (string value), with leading space
+(defmacro __dom-attr-s (buf name val)
+  (progn
+    (__dom-byte buf 32)        ;; space
+    (__dom-str buf name)
+    (__dom-byte buf 61)        ;; =
+    (__dom-byte buf 34)        ;; "
+    (__dom-str buf val)
+    (__dom-byte buf 34)))      ;; "
+
+;; ── SVG container ────────────────────────────────────────────────────────────
+
+;; (dom-svg buf id width height) — upsert an <svg id="ID" width="W" height="H"/>
+;; Use (dom-parent buf id) afterwards to insert SVG shapes as children.
+;; SVG child elements (circle, rect, path, …) are automatically created with
+;; the correct SVG namespace by the JS processor when insertionParent is an SVG.
+(defmacro dom-svg (buf id width height)
+  (progn
+    (__dom-open-tag buf "svg" id)
+    (__dom-str buf " width=\"")
+    (__dom-int buf width)
+    (__dom-str buf "\" height=\"")
+    (__dom-int buf height)
+    (__dom-str buf "\" viewBox=\"0 0 ")
+    (__dom-int buf width)
+    (__dom-byte buf 32)
+    (__dom-int buf height)
+    (__dom-byte buf 34)
+    (__dom-close-self buf)))
+
+;; SVG shape macros (rect, circle, line, text, path, …) are provided by
+;; lib/svg.woua.  Use (include svg) alongside (include dom), allocate an SvgBuf
+;; with (svg-buf-new cap), write shapes with svg-* macros, then flush the SvgBuf
+;; to the same dom fd: (svg-flush-to sbuf dom-fd).  Because the two protocols
+;; use the same newline-terminated element format, the dom processor handles both;
+;; SVG shapes are automatically created with createElementNS when the current
+;; insertion parent is an SVG element.
+
+;; ── Block elements ────────────────────────────────────────────────────────────
+
+;; (dom-div buf id) — upsert an empty <div id="ID"/>
+(defmacro dom-div (buf id)
+  (progn
+    (__dom-open-tag buf "div" id)
+    (__dom-close-self buf)))
+
+;; (dom-section buf id) — upsert an empty <section id="ID"/>
+(defmacro dom-section (buf id)
+  (progn
+    (__dom-open-tag buf "section" id)
+    (__dom-close-self buf)))
+
+;; ── Heading and text elements ─────────────────────────────────────────────────
+
+;; (dom-h1 buf id text)
+(defmacro dom-h1 (buf id text)
+  (progn
+    (__dom-open-tag buf "h1" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "h1")))
+
+;; (dom-h2 buf id text)
+(defmacro dom-h2 (buf id text)
+  (progn
+    (__dom-open-tag buf "h2" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "h2")))
+
+;; (dom-h3 buf id text)
+(defmacro dom-h3 (buf id text)
+  (progn
+    (__dom-open-tag buf "h3" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "h3")))
+
+;; (dom-p buf id text)
+(defmacro dom-p (buf id text)
+  (progn
+    (__dom-open-tag buf "p" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "p")))
+
+;; (dom-span buf id text)
+(defmacro dom-span (buf id text)
+  (progn
+    (__dom-open-tag buf "span" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "span")))
+
+;; (dom-pre buf id text)
+(defmacro dom-pre (buf id text)
+  (progn
+    (__dom-open-tag buf "pre" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "pre")))
+
+;; ── Form elements ─────────────────────────────────────────────────────────────
+
+;; (dom-button buf id text)
+(defmacro dom-button (buf id text)
+  (progn
+    (__dom-open-tag buf "button" id)
+    (__dom-byte buf 62)
+    (__dom-str buf text)
+    (__dom-close-tag buf "button")))
+
+;; (dom-input buf id type value)
+(defmacro dom-input (buf id type value)
+  (progn
+    (__dom-open-tag buf "input" id)
+    (__dom-attr-s buf "type" type)
+    (__dom-attr-s buf "value" value)
+    (__dom-close-self buf)))
+
+;; ── Grouping and structure ────────────────────────────────────────────────────
+
+;; (dom-parent buf id) — set insertion parent to element with given id.
+;; The element must already have been written to the buffer (and flushed, or
+;; written earlier in the same flush batch) so the processor can find it.
+(defmacro dom-parent (buf id)
+  (progn
+    (__dom-str buf "<!parent ")
+    (__dom-str buf id)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-parent-root buf) — reset insertion parent to the root container.
+(defmacro dom-parent-root (buf)
+  (progn
+    (__dom-str buf "<!parent-root>")
+    (__dom-byte buf 10)))
+
+;; ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+;; (dom-remove buf id) — remove element with given id from the DOM.
+(defmacro dom-remove (buf id)
+  (progn
+    (__dom-str buf "<!remove ")
+    (__dom-str buf id)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-clear buf) — remove all children from the root container.
+(defmacro dom-clear (buf)
+  (progn
+    (__dom-str buf "<!clear>")
+    (__dom-byte buf 10)))
+
+;; ── Attribute commands ────────────────────────────────────────────────────────
+
+;; (dom-style buf id css) — set the style attribute on element id.
+;; css must not contain the '>' character (use inline CSS property strings).
+(defmacro dom-style (buf id css)
+  (progn
+    (__dom-str buf "<!style ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-str buf css)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-class buf id classname) — set className on element id.
+(defmacro dom-class (buf id classname)
+  (progn
+    (__dom-str buf "<!class ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-str buf classname)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-text buf id text) — set textContent on element id.
+;; More efficient than re-emitting the full element when only the text changes.
+;; text must not contain the '>' character.
+(defmacro dom-text (buf id text)
+  (progn
+    (__dom-str buf "<!text ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-str buf text)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-attr buf id name value) — set an arbitrary attribute on element id.
+(defmacro dom-attr (buf id name value)
+  (progn
+    (__dom-str buf "<!attr ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-str buf name)
+    (__dom-byte buf 32)
+    (__dom-str buf value)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-root-style buf css) — set style on the root container element.
+(defmacro dom-root-style (buf css)
+  (dom-style buf "__root" css))
+
+;; (dom-root-attr buf name value) — set an attribute on the root container element.
+(defmacro dom-root-attr (buf name value)
+  (dom-attr buf "__root" name value))

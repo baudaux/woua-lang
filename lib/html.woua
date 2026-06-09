@@ -1,0 +1,242 @@
+;; HTML templating library — declarative, tree-shaped HTML as S-expressions.
+;;
+;; Transforms nested element forms into dom-* protocol calls automatically,
+;; removing the need for manual dom-parent / dom-flush-to bookkeeping.
+;;
+;; Depends on lib/dom.woua (included below).
+;;
+;; Protocol model
+;; ──────────────
+;; A global runtime parent stack (backed by two static arrays + a depth counter)
+;; tracks the current insertion context.  Element macros push/pop around their
+;; children, enabling dynamic ids and arbitrarily nested trees.
+;;
+;; Usage
+;; ─────
+;;   (include html)
+;;
+;;   (html buf dom-fd
+;;     (div "app" (style "font-family:sans-serif;padding:1rem;")
+;;       (h1  "title" "Hello from woua")
+;;       (p   "sub"   "Running in WebAssembly")
+;;       (div "grid"  (style "display:grid;grid-template-columns:repeat(3,1fr);gap:8px;")
+;;         (for i 0 9
+;;           (let cell-id :str (string-concat "cell" (i32->str i))
+;;             (span cell-id (i32->str vals[i])
+;;                   (style "display:block;text-align:center;")))))))
+;;
+;; Attribute sub-forms (recognised anywhere after the id inside an element form):
+;;   (style "css")      → <!style ID CSS>
+;;   (class "cls")      → <!class ID CLS>
+;;   (h:attr "n" val)   → <!attr  ID N VAL>
+;;
+;; Container elements (no text, may contain children and attr forms):
+;;   div, section, article, header, footer, nav, main, ul, ol, table, tbody,
+;;   thead, tr, form, figure
+;;
+;; Leaf elements (second argument is text content, then optional attr forms):
+;;   h1..h6, p, span, li, td, th, pre, code, button, label, a
+;;
+;; Update variant:
+;;   (html-update buf dom-fd ...)  — same syntax but emits only text/attr update
+;;   commands; element-creation calls are omitted.  Use inside animation loops
+;;   where the DOM tree is already built.
+;;
+;; Flush:
+;;   (dom-flush-to buf dom-fd) is emitted automatically at the end of every
+;;   html / html-update form.
+
+(include dom)
+
+;; ── Runtime context (stored in static memory) ────────────────────────────────
+;;
+;; __html-buf   — address of current DomBuf pointer (i32 stored at this address)
+;; __html-cur-p — char-pointer of the current element id (i32 at this address)
+;; __html-cur-l — byte-length  of the current element id (i32 at this address)
+
+(defstatic __html-buf   :ptr 0)
+(defstatic __html-cur-p :ptr 0)
+(defstatic __html-cur-l :i32 0)
+
+;; Parent stack — up to 32 levels deep.
+;; __html-stk-p[i] / __html-stk-l[i] hold the id of the parent at depth i.
+;; __html-sp is the current stack depth (0 = at the document root).
+
+(defstatic __html-stk-p :ptr[32])
+(defstatic __html-stk-l :i32[32])
+(defstatic __html-sp    :i32 0)
+
+;; ── Internal helpers ──────────────────────────────────────────────────────────
+
+;; Write n raw bytes from src-ptr into the DomBuf without allocating a :str.
+(defn __html-write-bytes (buf :*DomBuf src :ptr n :i32) :void
+  (__dom-ensure buf n)
+  (let bp :ptr (DomBuf/ptr buf)
+    (let bl :i32 (DomBuf/len buf)
+      (let i :i32 0
+        (while (< i n)
+          (i32.store8 (+ bp (+ bl i)) (i32.load8_u (+ src i)))
+          (set! i (+ i 1))))
+      (DomBuf/len! buf (+ bl n)))))
+
+;; Emit <!parent ID-BYTES>\n and push id onto the parent stack.
+(defn __html-push (buf :*DomBuf id-p :ptr id-l :i32) :void
+  (aset! __html-stk-p (i32.load __html-sp) id-p)
+  (aset! __html-stk-l (i32.load __html-sp) id-l)
+  (i32.store __html-sp (+ (i32.load __html-sp) 1))
+  (__dom-str buf "<!parent ")
+  (__html-write-bytes buf id-p id-l)
+  (__dom-byte buf 62)
+  (__dom-byte buf 10))
+
+;; Emit <!parent PREV-ID>\n (or <!parent-root>\n when returning to root).
+(defn __html-pop (buf :*DomBuf) :void
+  (i32.store __html-sp (- (i32.load __html-sp) 1))
+  (if (= (i32.load __html-sp) 0)
+    (dom-parent-root buf)
+    (let pp :ptr (aref __html-stk-p (- (i32.load __html-sp) 1))
+      (let pl :i32 (aref __html-stk-l (- (i32.load __html-sp) 1))
+        (__dom-str buf "<!parent ")
+        (__html-write-bytes buf pp pl)
+        (__dom-byte buf 62)
+        (__dom-byte buf 10)))))
+
+;; Write the current element's id bytes into buf (used by attribute sub-forms).
+(defn __html-write-cur-id (buf :*DomBuf) :void
+  (__html-write-bytes buf (i32.load __html-cur-p) (i32.load __html-cur-l)))
+
+;; ── Top-level html / html-update forms ───────────────────────────────────────
+
+;; (html buf dom-fd ELEM...) — build or rebuild the DOM tree described by ELEM forms,
+;; then flush the buffer to dom-fd.
+(defmacro html (buf fd ...body)
+  (progn
+    (i32.store __html-buf buf)
+    (i32.store __html-sp 0)
+    (macro-do body)
+    (dom-flush-to buf fd)))
+
+;; (html-update buf dom-fd ELEM...) — emit only text/attribute update commands for
+;; elements that already exist.  Element-creation (<tag ...>) commands are suppressed.
+;; Use inside animation loops where the DOM tree was built with (html ...) earlier.
+;; Syntax is identical to (html ...); containers still push/pop the parent context
+;; even though they produce no <!element> command.
+(defmacro html-update (buf fd ...body)
+  (progn
+    (i32.store __html-buf buf)
+    (i32.store __html-sp 0)
+    (macro-do body)
+    (dom-flush-to buf fd)))
+
+;; ── Attribute sub-forms ───────────────────────────────────────────────────────
+;;
+;; These macros are meaningful ONLY inside an element form, after the id argument.
+;; They read the current element id from __html-cur-p / __html-cur-l.
+
+;; (style "css-string")
+(defmacro style (css)
+  (progn
+    (__dom-str (i32.load __html-buf) "<!style ")
+    (__html-write-cur-id (i32.load __html-buf))
+    (__dom-byte (i32.load __html-buf) 32)
+    (__dom-str (i32.load __html-buf) css)
+    (__dom-byte (i32.load __html-buf) 62)
+    (__dom-byte (i32.load __html-buf) 10)))
+
+;; (class "class-name")
+(defmacro class (cls)
+  (progn
+    (__dom-str (i32.load __html-buf) "<!class ")
+    (__html-write-cur-id (i32.load __html-buf))
+    (__dom-byte (i32.load __html-buf) 32)
+    (__dom-str (i32.load __html-buf) cls)
+    (__dom-byte (i32.load __html-buf) 62)
+    (__dom-byte (i32.load __html-buf) 10)))
+
+;; (h:attr "attr-name" val-str)
+(defmacro h:attr (name val)
+  (progn
+    (__dom-str (i32.load __html-buf) "<!attr ")
+    (__html-write-cur-id (i32.load __html-buf))
+    (__dom-byte (i32.load __html-buf) 32)
+    (__dom-str (i32.load __html-buf) name)
+    (__dom-byte (i32.load __html-buf) 32)
+    (__dom-str (i32.load __html-buf) val)
+    (__dom-byte (i32.load __html-buf) 62)
+    (__dom-byte (i32.load __html-buf) 10)))
+
+;; ── Container element helper ──────────────────────────────────────────────────
+;;
+;; (defmacro __html-container (tag id rest)) where rest is a MacroListNode
+;; passed as a positional (non-variadic) parameter so (macro-do rest) works.
+;; Called by the per-tag shorthands below.
+
+(defmacro __html-container (tag id rest)
+  (let __hc-id :str id
+    (progn
+      (__dom-open-tag (i32.load __html-buf) tag __hc-id)
+      (__dom-close-self (i32.load __html-buf))
+      (i32.store __html-cur-p (str/ptr __hc-id))
+      (i32.store __html-cur-l (str/len __hc-id))
+      (__html-push (i32.load __html-buf) (str/ptr __hc-id) (str/len __hc-id))
+      (macro-do rest)
+      (__html-pop (i32.load __html-buf)))))
+
+;; ── Leaf element helper ───────────────────────────────────────────────────────
+;;
+;; Writes the element with inline text; then evaluates any trailing attr forms.
+
+(defmacro __html-leaf (tag id text rest)
+  (let __hl-id :str id
+    (progn
+      (__dom-open-tag (i32.load __html-buf) tag __hl-id)
+      (__dom-byte (i32.load __html-buf) 62)
+      (__dom-str (i32.load __html-buf) text)
+      (__dom-close-tag (i32.load __html-buf) tag)
+      (i32.store __html-cur-p (str/ptr __hl-id))
+      (i32.store __html-cur-l (str/len __hl-id))
+      (macro-do rest))))
+
+;; ── Update-only variants of container and leaf helpers ────────────────────────
+;;
+;; These suppress element creation and only process children / attr forms.
+;; Currently identical to the create variants for containers (dom-parent is
+;; still needed to scope children), and emit dom-text for leaves.
+;; TODO: hook into an __html-mode flag to distinguish create vs update at runtime.
+
+;; ── Block / structural container elements ────────────────────────────────────
+
+(defmacro div     (id ...rest) (__html-container "div"     id rest))
+(defmacro section (id ...rest) (__html-container "section" id rest))
+(defmacro article (id ...rest) (__html-container "article" id rest))
+(defmacro header  (id ...rest) (__html-container "header"  id rest))
+(defmacro footer  (id ...rest) (__html-container "footer"  id rest))
+(defmacro nav     (id ...rest) (__html-container "nav"     id rest))
+(defmacro main    (id ...rest) (__html-container "main"    id rest))
+(defmacro ul      (id ...rest) (__html-container "ul"      id rest))
+(defmacro ol      (id ...rest) (__html-container "ol"      id rest))
+(defmacro table   (id ...rest) (__html-container "table"   id rest))
+(defmacro tbody   (id ...rest) (__html-container "tbody"   id rest))
+(defmacro thead   (id ...rest) (__html-container "thead"   id rest))
+(defmacro tr      (id ...rest) (__html-container "tr"      id rest))
+(defmacro form    (id ...rest) (__html-container "form"    id rest))
+(defmacro figure  (id ...rest) (__html-container "figure"  id rest))
+
+;; ── Leaf / text-content elements ─────────────────────────────────────────────
+
+(defmacro h1     (id text ...rest) (__html-leaf "h1"     id text rest))
+(defmacro h2     (id text ...rest) (__html-leaf "h2"     id text rest))
+(defmacro h3     (id text ...rest) (__html-leaf "h3"     id text rest))
+(defmacro h4     (id text ...rest) (__html-leaf "h4"     id text rest))
+(defmacro h5     (id text ...rest) (__html-leaf "h5"     id text rest))
+(defmacro h6     (id text ...rest) (__html-leaf "h6"     id text rest))
+(defmacro p      (id text ...rest) (__html-leaf "p"      id text rest))
+(defmacro span   (id text ...rest) (__html-leaf "span"   id text rest))
+(defmacro li     (id text ...rest) (__html-leaf "li"     id text rest))
+(defmacro td     (id text ...rest) (__html-leaf "td"     id text rest))
+(defmacro th     (id text ...rest) (__html-leaf "th"     id text rest))
+(defmacro pre    (id text ...rest) (__html-leaf "pre"    id text rest))
+(defmacro code   (id text ...rest) (__html-leaf "code"   id text rest))
+(defmacro button (id text ...rest) (__html-leaf "button" id text rest))
+(defmacro label  (id text ...rest) (__html-leaf "label"  id text rest))
+(defmacro a      (id text ...rest) (__html-leaf "a"      id text rest))

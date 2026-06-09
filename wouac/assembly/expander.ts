@@ -8,7 +8,7 @@ import { Node, ListNode, SymbolNode, IntNode, FloatNode, StringNode, RegexNode,
          MacroListNode, CommentNode, V128Node,
          TAG_INT, TAG_FLOAT, TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX, TAG_MACROLIST,
          TAG_COMMENT, TAG_V128 } from "./ast";
-import { Env, MacroInfo, ImportInfo, OpInfo, LiteralInfo, ProtocolInfo, ProtocolMethodSig, GlobalInfo } from "./env";
+import { Env, StaticInfo, MacroInfo, ImportInfo, OpInfo, LiteralInfo, ProtocolInfo, ProtocolMethodSig, GlobalInfo } from "./env";
 
 // Register one WAT global per leaf field of a value-type struct.
 // Recurses into embedded structs so nested value types are fully flattened.
@@ -227,6 +227,11 @@ function expandNode(node: Node, env: Env): Node {
     // ── (sprintf buf "fmt" args...) — write formatted string into a buffer ───
     if (name == "sprintf") {
       return expandSprintf(list, env);
+    }
+
+    // ── (strfmt "fmt" args...) — like sprintf but allocates and returns :str ───
+    if (name == "strfmt") {
+      return expandStrfmt(list, env);
     }
 
     if (env.macros.has(name)) {
@@ -827,6 +832,168 @@ function expandSprintf(list: ListNode, env: Env): Node {
   callNode.children.push(new SymbolNode(funcName));
   callNode.children.push(expandNode(list.children[1], env)); // buf
   for (let i = 3; i < list.children.length; i++) {
+    callNode.children.push(expandNode(list.children[i], env));
+  }
+  return callNode;
+}
+
+// Emit WAT for copying $__s_ptr/$__s_len into scratchAddr+$__pos.
+// Top-level helper (not a closure) to satisfy AssemblyScript's no-capture rule.
+function emitCopyToScratch(scratchAddr: i32): string {
+  let s = "";
+  s += "    (local.set $__i (i32.const 0))\n";
+  s += "    (block $__cps_brk\n";
+  s += "      (loop $__cps_lp\n";
+  s += "        (br_if $__cps_brk (i32.ge_u (local.get $__i) (local.get $__s_len)))\n";
+  s += "        (i32.store8 (i32.add (i32.add (i32.const " + scratchAddr.toString() + ") (local.get $__pos)) (local.get $__i))\n";
+  s += "                    (i32.load8_u (i32.add (local.get $__s_ptr) (local.get $__i))))\n";
+  s += "        (local.set $__i (i32.add (local.get $__i) (i32.const 1)))\n";
+  s += "        (br $__cps_lp)))\n";
+  s += "    (local.set $__pos (i32.add (local.get $__pos) (local.get $__s_len)))\n";
+  return s;
+}
+
+// Build the WAT function body for a strfmt-generated function.
+// Writes all segments into a shared static scratch buffer, then allocates
+// exactly that many bytes, copies, and returns a two-value :str (ptr, len).
+function buildStrfmtFunc(fmt: string, funcName: string, scratchAddr: i32, env: Env): string {
+  const argTypes = new Array<string>();
+  const segments = parsePrintfFormat(fmt, argTypes, env);
+
+  let escFmt = "";
+  for (let i = 0; i < fmt.length; i++) {
+    const ch = fmt.charAt(i);
+    if (ch == "\"") escFmt += "\\\"";
+    else if (ch == "\n") escFmt += "\\n";
+    else escFmt += ch;
+  }
+
+  let wat = "  (; strfmt \"" + escFmt + "\" ;)\n  (func $" + funcName;
+  for (let j = 0; j < argTypes.length; j++) {
+    wat += " (param $a" + j.toString() + " " + argTypes[j] + ")";
+  }
+  wat += " (result i32 i32)\n";
+  wat += "    (local $__pos i32)\n";
+  wat += "    (local $__s_ptr i32)\n";
+  wat += "    (local $__s_len i32)\n";
+  wat += "    (local $__i i32)\n";
+  wat += "    (local $__out i32)\n";
+
+  let curArg: i32 = 0;
+  for (let j = 0; j < segments.length; j++) {
+    const seg = segments[j];
+    if (seg.startsWith("L:")) {
+      const colon1 = seg.indexOf(":", 2) as i32;
+      const ptr    = i32(I64.parseInt(seg.slice(2, colon1)));
+      const len    = i32(I64.parseInt(seg.slice(colon1 + 1)));
+      wat += "    (local.set $__s_ptr (i32.const " + ptr.toString() + "))\n";
+      wat += "    (local.set $__s_len (i32.const " + len.toString() + "))\n";
+      wat += emitCopyToScratch(scratchAddr);
+    } else if (seg == "A:i32") {
+      wat += "    (call $i32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopyToScratch(scratchAddr);
+      curArg++;
+    } else if (seg == "A:i64") {
+      wat += "    (call $i64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopyToScratch(scratchAddr);
+      curArg++;
+    } else if (seg == "A:str") {
+      wat += "    (local.set $__s_ptr (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len (local.get $a" + (curArg + 1).toString() + "))\n";
+      wat += emitCopyToScratch(scratchAddr);
+      curArg += 2;
+    } else if (seg == "A:char") {
+      wat += "    (i32.store8 (i32.add (i32.const " + scratchAddr.toString() + ") (local.get $__pos)) (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__pos (i32.add (local.get $__pos) (i32.const 1)))\n";
+      curArg++;
+    } else if (seg == "A:f32") {
+      wat += "    (call $f32->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopyToScratch(scratchAddr);
+      curArg++;
+    } else if (seg == "A:f64") {
+      wat += "    (call $f64->str (local.get $a" + curArg.toString() + "))\n";
+      wat += "    (local.set $__s_len)\n";
+      wat += "    (local.set $__s_ptr)\n";
+      wat += emitCopyToScratch(scratchAddr);
+      curArg++;
+    }
+  }
+  // Allocate exactly $__pos bytes, copy from scratch, return :str (ptr, len)
+  wat += "    (local.set $__out (call $alloc (local.get $__pos)))\n";
+  wat += "    (local.set $__i (i32.const 0))\n";
+  wat += "    (block $__cp2_brk\n";
+  wat += "      (loop $__cp2_lp\n";
+  wat += "        (br_if $__cp2_brk (i32.ge_u (local.get $__i) (local.get $__pos)))\n";
+  wat += "        (i32.store8 (i32.add (local.get $__out) (local.get $__i))\n";
+  wat += "                    (i32.load8_u (i32.add (i32.const " + scratchAddr.toString() + ") (local.get $__i))))\n";
+  wat += "        (local.set $__i (i32.add (local.get $__i) (i32.const 1)))\n";
+  wat += "        (br $__cp2_lp)))\n";
+  wat += "    (local.get $__out)\n";
+  wat += "    (local.get $__pos)\n";
+  wat += "  )\n";
+  return wat;
+}
+
+// Expand a (strfmt "fmt" args...) call.
+// Returns (call $__strfmt_N arg1 arg2 ...) whose result is a :str fat-pointer.
+function expandStrfmt(list: ListNode, env: Env): Node {
+  if (list.children.length < 2) {
+    env.errors.push("strfmt: expected (strfmt \"fmt\" args...)");
+    return new IntNode(0 as i64);
+  }
+  const fmtArg = list.children[1];
+  let fmtStr = "";
+  if (fmtArg.tag == TAG_STRING) {
+    fmtStr = (fmtArg as StringNode).value;
+  } else if (fmtArg.tag == TAG_SYMBOL) {
+    const sym = (fmtArg as SymbolNode).name;
+    if (sym.startsWith("__str:")) fmtStr = sym.slice(6);
+    else {
+      env.errors.push("strfmt: format must be a string literal (got '" + sym + "')");
+      return new IntNode(0 as i64);
+    }
+  } else {
+    env.errors.push("strfmt: format must be a compile-time string literal");
+    return new IntNode(0 as i64);
+  }
+
+  // Lazy-allocate shared scratch buffer (512 bytes) the first time strfmt is used.
+  if (!env.statics.has("__strfmt_scratch")) {
+    const scratchPtr = env.allocate(512, 1);
+    env.statics.set("__strfmt_scratch", new StaticInfo(scratchPtr, 512, ":bytes"));
+  }
+  const scratchAddr = env.statics.get("__strfmt_scratch").ptr;
+
+  // Cache: one generated function per distinct format string.
+  const cacheKey = "__strfmt:" + fmtStr;
+  let funcName = "";
+  if (env.printfFuncsByFmt.has(cacheKey)) {
+    funcName = env.printfFuncsByFmt.get(cacheKey);
+  } else {
+    const probeTypes = printfArgTypes(fmtStr);
+    const typeSig = probeTypes.length > 0 ? probeTypes.join("_") : "void";
+    const baseName = "__strfmt_" + typeSig;
+    const count = env.printfNameCounts.has(baseName) ? env.printfNameCounts.get(baseName) : 0;
+    env.printfNameCounts.set(baseName, count + 1);
+    funcName = count == 0 ? baseName : baseName + "_" + (count + 1).toString();
+    env.printfFuncsByFmt.set(cacheKey, funcName);
+    const body = buildStrfmtFunc(fmtStr, funcName, scratchAddr, env);
+    env.funcBodies.set(funcName, body);
+    env.funcNames.push(funcName);
+    // Register as :str-returning so typeOf() resolves call sites correctly.
+    env.funcResultTypes.set(funcName, ":str");
+  }
+
+  // (call $__strfmt_N arg1 arg2 ...)
+  const callNode = new ListNode();
+  callNode.children.push(new SymbolNode(funcName));
+  for (let i = 2; i < list.children.length; i++) {
     callNode.children.push(expandNode(list.children[i], env));
   }
   return callNode;

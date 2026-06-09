@@ -203,6 +203,92 @@
   - Rust equivalents compiled with `rustc -O` or `cargo build --release`; wasmtime run with `--wasm simd` where needed
   - Expected outcome: wasmtime/woua within ~1.5–2× of native Rust for compute-bound kernels; larger gaps expose missing optimisations
 
+- [x] #71 HTML DOM rendering — build interactive HTML apps from woua programs by writing incremental DOM commands to `/dev/dom`, a virtual device file provided by the host environment
+  - **Protocol**: each `write` to `/dev/dom` carries one or more newline-terminated commands; the JS bridge applies them to a live HTML container using upsert-by-id — if an element with the given `id` already exists its attributes/text are updated in place, otherwise a new child element is inserted under the current insertion parent; this enables both static layout and live animation without full redraws
+  - **`DomBuf` deftype** — `(ptr :ptr) (len :i32) (cap :i32)`; all commands take a `:*DomBuf` and update `len` in place; the caller passes `(DomBuf/ptr buf)` and `(DomBuf/len buf)` to `write`; mirrors `SvgBuf` from `lib/svg.woua`
+  - **`lib/dom.woua`** — woua-side library that serialises DOM commands into a linear-memory byte buffer:
+    - `(dom-buf-new cap)` — allocate a `DomBuf` with `cap` byte capacity
+    - `(dom-buf-reset buf)` — reset write cursor to start
+    - `(dom-flush-to buf fd)` — write buffer contents to fd and reset
+    - **Block elements**: `(dom-div buf id)`, `(dom-section buf id)` — upsert an empty container element
+    - **Text elements**: `(dom-h1 buf id text)`, `(dom-h2 buf id text)`, `(dom-h3 buf id text)`, `(dom-p buf id text)`, `(dom-span buf id text)`, `(dom-pre buf id text)` — upsert element with text content
+    - **Form elements**: `(dom-button buf id text)`, `(dom-input buf id type value)`
+    - **Structure**: `(dom-parent buf id)` — set insertion parent; `(dom-parent-root buf)` — reset to root container
+    - **Lifecycle**: `(dom-remove buf id)` — remove element; `(dom-clear buf)` — remove all children from root
+    - **Attribute commands**: `(dom-style buf id css)`, `(dom-class buf id classname)`, `(dom-text buf id text)`, `(dom-attr buf id name value)`
+    - **Root helpers**: `(dom-root-style buf css)`, `(dom-root-attr buf name value)` — target the container element via the sentinel id `"__root"`
+    - Commands serialised as ASCII protocol strings into the buffer; no intermediate AST
+    - To send: open `/dev/dom` with `open-file`, `write` `(DomBuf/len buf)` bytes from `(DomBuf/ptr buf)`, close the fd
+  - **Protocol messages** (newline-terminated):
+    - `<tag id="ID" attr="val".../>` — upsert self-closing element
+    - `<tag id="ID" ...>TEXT</tag>` — upsert element with text content
+    - `<!parent ID>` / `<!parent-root>` — control insertion context
+    - `<!remove ID>` / `<!clear>` — remove element or all children
+    - `<!style ID CSS>` / `<!class ID CLASSNAME>` — set style or className
+    - `<!text ID TEXT>` — set textContent (efficient for live value updates)
+    - `<!attr ID NAME VALUE>` — set arbitrary attribute
+    - Special id `"__root"` in directives refers to the root container element
+  - **`js/dom-processor.js`** — JavaScript DOM protocol processor:
+    - `makeDomProcessor(root)` → `(line: string) => void`; stateful, tracks insertion parent
+    - Creates plain HTML elements via `document.createElement` (no namespace needed)
+    - Handles all protocol directives; `<!text>` sets `textContent` directly for efficiency
+  - **`js/dom-bridge.js`** — JavaScript host-side module that exposes `/dev/dom` as a WASI preopened virtual device:
+    - `mountDom(wasmImports, selector)` — injects the virtual device into the WASI imports object and mounts a container `<div class="woua-dom">` under the selected element; call before `WebAssembly.instantiate`
+    - Intercepts `fd_write` calls on the `/dev/dom` fd; parses each newline-terminated write using `dom-processor.js`
+    - Returns a bridge object with `setMemory(mem)` and `connectInstance(instance)` helpers
+    - Plugs into the WASI imports object passed to `WebAssembly.instantiate`; no changes to the woua runtime
+  - **`demos/dom_demo.woua`** — demo that builds a live 3×3 counter dashboard: nine HSL-coloured cells each incrementing at a different rate; initial layout sent once via element creation commands, then only `<!text>` directives are sent each frame (80 ms per tick) to update the displayed values by id
+  - **`demos/dom_worker.js`** — Web Worker companion to `dom_demo.html`; uses `wasi-min.js` with `onPathOpen`/`onFdWrite` hooks to intercept `/dev/dom` writes and post `{ type: 'dom', line }` messages to the main thread
+  - **`demos/dom_demo.html`** — HTML page that spawns the worker, creates the `makeDomProcessor` on the main thread, and wires worker messages to DOM updates
+
+- [ ] #72 JSX-like HTML templating — a `lib/html.woua` macro library that transforms declarative, tree-shaped HTML-as-S-expressions into `dom-*` protocol calls, eliminating the manual `dom-parent` / `dom-flush-to` bookkeeping required by the low-level API
+  - **Motivation**: the current `dom-*` API is assembly-level — each element, attribute, and parent switch is a separate call; a declarative tree notation mirrors the HTML structure directly and is easier to read, write, and refactor; it also makes it straightforward to see which elements are children of which, since that relationship is encoded in nesting rather than in `dom-parent` side-effects
+  - **Proposed syntax** — element forms are `(tag "id" attr-form... child-or-expr...)`:
+    ```woua
+    (html buf dom-fd
+      (div "app" (style "font-family:sans-serif;padding:1rem;")
+        (h1  "title"    "woua DOM demo")
+        (p   "subtitle" "Live counter board — running in WebAssembly")
+        (div "grid" (style "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;")
+          (for i 0 9
+            (span (id (string-concat "cell" (i32->str i)))
+                  (style "display:block;text-align:center;border-radius:8px;")
+                  (i32->str vals[i]))))
+        (p "status" (string-concat "Frame: " (i32->str frame)))))
+    ```
+  - **Expansion model** — each `(TAG ID-OR-ATTR... CHILD...)` form inside `html` expands to:
+    1. `(dom-TAG buf id TEXT)` or `(dom-TAG buf id)` — creates/upserts the element
+    2. recognised attribute sub-forms emit their corresponding `dom-*` call on `id`
+    3. `(dom-parent buf id)` — push insertion context before expanding child element forms
+    4. child forms expand recursively
+    5. `(dom-parent buf parent-id)` or `(dom-parent-root buf)` — pop insertion context
+    6. non-form children (string literals, runtime expressions returning `:str`) become the element's text content via `dom-text`
+    7. `(dom-flush-to buf fd)` is emitted once at the end of the top-level `html` call
+  - **Attribute sub-forms** — recognised by the macro, stripped before processing children:
+    - `(id expr)` — dynamic id (expression returning `:str`); required when id cannot be a string literal
+    - `(style "css")` → `(dom-style buf id "css")`
+    - `(class "cls")` → `(dom-class buf id "cls")`
+    - `(attr "name" expr)` → `(dom-attr buf id "name" expr)`
+  - **ID handling** — when the first child of a tag form is a string literal it is used as the element id (e.g. `(div "app" ...)`); when it is an `(id expr)` sub-form the id is a runtime expression evaluated once and bound to a local variable
+  - **Implementation — runtime parent stack**: `lib/html.woua` provides a small runtime with `(__html-push-parent id)` / `(__html-pop-parent)` backed by a static stack of `:str` values; the `html` macro emits push/pop calls around each container element instead of inlining literal `dom-parent` strings; this enables dynamic ids, dynamic tag selection, element forms inside function calls, and — crucially — `defhtml` components that contain nested children and can be attached to any parent at the call site without the caller having to pass a parent-id parameter explicitly; costs a handful of bytes of static memory and two protocol writes per nesting level
+  - **`defhtml` — reusable components**: define named, parameterised HTML fragments that inline at the call site:
+    ```woua
+    (defhtml counter-cell (buf i val)
+      (span (id (string-concat "cell" (i32->str i)))
+            (style "display:block;text-align:center;border-radius:8px;")
+            (i32->str val)))
+
+    ;; Usage inside an html form:
+    (html buf dom-fd
+      (div "grid" (style "display:grid;...")
+        (for i 0 9
+          (counter-cell buf i vals[i]))))
+    ```
+    `defhtml` expands to a `defmacro` that splices the body into the surrounding `html` expansion, so the parent context and buffer variable are inherited automatically; components are therefore inlinable templates, not runtime function calls
+  - **SVG interop**: within an `html` form, an `(svg "id" w h SVGCHILD...)` form creates an `<svg>` container via `dom-svg`, then switches to a `SvgBuf` and emits child elements using `svg-*` macros (from `lib/svg.woua`) flushed to the same dom fd; the caller passes both `buf` and `sbuf` to `html`; a keyword like `:svg sbuf` distinguishes the SVG buffer from the dom buffer
+  - **Update variant**: `(html-update buf dom-fd ...)` omits element-creation calls and emits only `dom-text` / `dom-attr` / `svg-rect` etc. for existing elements — used in the animation loop where the DOM structure is already built; the macro distinguishes creation vs update by checking whether text content or attribute sub-forms are present on a leaf node
+  - **`lib/html.woua`** — the macro library; depends on `lib/dom.woua` (and optionally `lib/svg.woua` for SVG interop); no new WASI calls, no compiler changes required for v1
+
 - [x] #68 SVG rendering — draw 2-D graphics from woua programs by writing incremental SVG commands to `/dev/svg`, a virtual device file provided by the host environment
   - **Protocol**: each `write` to `/dev/svg` carries one or more SVG element fragments; the JS bridge applies them incrementally to the DOM using upsert-by-id — if an element with the given `id` already exists its attributes are updated in place, otherwise a new child element is inserted into the `<svg>` container; this enables both static scenes and live animation without full redraws
   - **`SvgBuf` deftype** — `(ptr :ptr) (len :i32) (cap :i32)`; all commands take a `:*SvgBuf` and update `len` in place; the caller passes `(SvgBuf/ptr buf)` and `(SvgBuf/len buf)` to `write`; eliminates manual write-cursor tracking

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>woua DOM demo</title>
+  <style>
+    body  { font-family: sans-serif; margin: 2rem; background: #f0f2f5; }
+    h2    { margin-bottom: 0.5rem; }
+    #app-container { background: #fff; border-radius: 10px; padding: 0.25rem;
+                     box-shadow: 0 2px 10px rgba(0,0,0,0.10); display: inline-block; }
+    #page-status { margin-top: 0.75rem; color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h2>woua DOM demo</h2>
+  <div id="app-container"></div>
+  <p id="page-status">Loading…</p>
+
+  <script type="module">
+    import { makeDomProcessor } from '../js/dom-processor.js';
+
+    const root   = document.getElementById('app-container');
+    const status = document.getElementById('page-status');
+
+    const processMessage = makeDomProcessor(root);
+
+    const worker = new Worker(
+      new URL('./dom_worker.js', import.meta.url),
+      { type: 'module' }
+    );
+
+    worker.onmessage = ({ data }) => {
+      if (data.type === 'dom')   processMessage(data.line);
+      if (data.type === 'exit')  status.textContent = `Done (exit ${data.code}).`;
+      if (data.type === 'error') status.textContent = `Error: ${data.message}`;
+    };
+
+    worker.postMessage({ type: 'start', wasmUrl: 'out/dom_demo.wasm' });
+    status.textContent = 'Running…';
+  </script>
+</body>
+</html>

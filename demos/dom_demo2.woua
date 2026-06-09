@@ -1,0 +1,103 @@
+(include dom)
+(include svg)
+
+;; Frame delay: 80 ms ≈ 12 fps
+(defconst FRAME-NS 80000000)
+
+;; Number of counter cells in the 3×3 grid
+(defconst NCELLS 9)
+
+(defn main ()
+  (let* ((dom-fd :i32     (open-file "/dev/dom" 0))
+         (buf    :*DomBuf  (dom-buf-new 8192))
+         (sbuf   :*SvgBuf  (svg-buf-new 2048))
+         (frame  :i32      0)
+         (vals   :i32[NCELLS]))
+
+    ;; ── Build initial layout ──────────────────────────────────────────
+
+    ;; Outer app container (child of root)
+    (dom-div buf "app")
+    (dom-style buf "app" "font-family:sans-serif;max-width:480px;padding:1.25rem;")
+    (dom-parent buf "app")
+
+    ;; Title
+    (dom-h1 buf "title" "woua DOM demo")
+    (dom-style buf "title" "margin:0 0 0.2rem;color:#2c3e50;font-size:1.6rem;")
+
+    ;; Subtitle
+    (dom-p buf "subtitle" "Live counter board — running in WebAssembly")
+    (dom-style buf "subtitle" "margin:0 0 1rem;color:#7f8c8d;font-size:0.9rem;")
+
+    ;; 3×3 grid container
+    (dom-div buf "grid")
+    (dom-style buf "grid"
+      "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:1rem;")
+    (dom-parent buf "grid")
+
+    ;; Create all nine counter cells — colour computed from index as hsl(i*40, 65%, 52%)
+    (for i 0 NCELLS
+      (dom-span buf (string-concat "cell" (i32->str i)) "0")
+      (dom-style buf (string-concat "cell" (i32->str i))
+        (string-concat
+          "display:block;padding:22px 0;text-align:center;font-size:1.7rem;"
+          (string-concat
+            "font-family:monospace;font-weight:bold;color:#fff;border-radius:8px;background:hsl("
+            (string-concat (i32->str (* i 40)) ",65%,52%)")))))
+
+    ;; SVG bar chart — flush HTML so far, then create bars inside the SVG.
+    ;; The flush sets insertionParent = #chart (an SVGElement), so the
+    ;; subsequent svg-rect calls get createElementNS automatically.
+    (dom-parent buf "app")
+    (dom-svg buf "chart" 460 100)
+    (dom-style buf "chart" "display:block;margin-bottom:0.5rem;border-radius:6px;background:#f8f8f8;")
+    (dom-parent buf "chart")
+    (dom-flush-to buf dom-fd)
+
+    ;; Create 9 bars via lib/svg.woua — SvgBuf flushed to the same dom-fd.
+    ;; x[i] = 10 + i*50, initial height = 4 (grows upward from y=96)
+    (for i 0 NCELLS
+      (svg-rect sbuf
+        (string-concat "bar" (i32->str i))
+        (+ 10 (* i 50)) 96 40 4
+        (string-concat "hsl(" (string-concat (i32->str (* i 40)) ",65%,52%)"))))
+    (svg-flush-to sbuf dom-fd)
+
+    ;; Back to app container for the status line
+    (dom-parent buf "app")
+
+    ;; Status bar
+    (dom-p buf "status" "Frame: 0")
+    (dom-style buf "status" "margin:0;color:#aaa;font-size:0.78rem;font-family:monospace;")
+
+    ;; Send remaining HTML
+    (dom-flush-to buf dom-fd)
+
+    ;; ── Animation loop ────────────────────────────────────────────────
+    (while 1
+      (poll-sleep-ns (as :i64 FRAME-NS))
+      (set! frame (+ frame 1))
+
+      ;; Increment each counter by its index + 1
+      (for i 0 NCELLS
+        (aset! vals i (+ vals[i] (+ i 1))))
+
+      ;; Update cell text only — no DOM structure or style changes
+      (for i 0 NCELLS
+        (dom-text buf
+          (string-concat "cell" (i32->str i))
+          (i32->str vals[i])))
+
+      ;; Update bar heights — cycle 0-79 using modulo
+      (for i 0 NCELLS
+        (let h :i32 (+ (% vals[i] 80) 4)
+          (svg-rect sbuf
+            (string-concat "bar" (i32->str i))
+            (+ 10 (* i 50)) (- 100 h) 40 h
+            (string-concat "hsl(" (string-concat (i32->str (* i 40)) ",65%,52%)")))))
+
+      ;; Update frame counter
+      (dom-text buf "status" (string-concat "Frame: " (i32->str frame)))
+
+      (dom-flush-to buf dom-fd)
+      (svg-flush-to sbuf dom-fd))))
