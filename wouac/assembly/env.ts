@@ -48,8 +48,18 @@ export class StaticInfo {
   }
 
   isString(): bool { return this.typeName == ":strlit" || this.typeName == ":*str"; }
-  isBytes():  bool { return this.typeName == ":bytes";  }
+  isBytes():  bool { return this.typeName == ":bytes" || this.typeName == ":bytes-file"; }
   isScalar(): bool { return this.len == -1;              }
+}
+
+// Pre-read data for a (defstatic name :bytes "file") embed
+export class FileEmbedInfo {
+  watBytes: string; // raw file bytes encoded as WAT \xx escapes (no surrounding quotes)
+  byteLen:  i32;    // exact byte count of the file
+  constructor(watBytes: string, byteLen: i32) {
+    this.watBytes = watBytes;
+    this.byteLen  = byteLen;
+  }
 }
 
 // Info stored for each field in a (deftype ...) declaration
@@ -233,6 +243,8 @@ export class Env {
 
   // ── Compiler options ─────────────────────────────────────────────────────
   noPeephole: bool = false;  usesSvg:    bool = false;  // true when lib/svg.woua is included → emit shared memory
+  sourceDir:  string = "";                               // base dir of the main source file (for :bytes file resolution)
+  fileEmbeds: Map<string, FileEmbedInfo> = new Map<string, FileEmbedInfo>(); // pre-read :bytes file embed data
   // ── Alignment helpers ────────────────────────────────────────────────────────
 
   alignOf(typeName: string): i32 {

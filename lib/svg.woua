@@ -16,6 +16,7 @@
 ;;   <!style ID CSS>\n                  — set style attribute on element ID
 ;;   <!transform ID T>\n                — set transform attribute on element ID
 ;;   <!attr ID NAME VALUE>\n            — set arbitrary attribute on element ID
+;;   <!title TEXT>\n                   — set document.title
 ;;
 ;; The special id "__root" in <!style>, <!transform> and <!attr> refers to the
 ;; root <svg> element.  Use (svg-root-attr) / (svg-root-style) to target it.
@@ -497,6 +498,14 @@
     (__svg-attr-i buf "refY" ref-y)
     (__svg-attr-s buf "orient" orient)
     (__svg-close-self buf)))
+
+;; (svg-title buf text) — set the browser tab / window title (document.title).
+(defmacro svg-title (buf text)
+  (progn
+    (__svg-str buf "<!title ")
+    (__svg-str buf text)
+    (__svg-byte buf 62)
+    (__svg-byte buf 10)))
 
 ;; (svg-marker-attach buf element-id marker-id end)
 ;; end: 0=marker-start, 1=marker-end, 2=marker-mid

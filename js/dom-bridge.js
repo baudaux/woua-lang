@@ -27,6 +27,9 @@
  *   <!class ID CLASSNAME>            — element.className = CLASSNAME
  *   <!text ID TEXT>                  — element.textContent = TEXT
  *   <!attr ID NAME VALUE>            — setAttribute(NAME, VALUE) on element ID
+ *   <!blob BLOB-ID PTR LEN MIME>     — create Blob from WASM memory[PTR..PTR+LEN], register ObjectURL under BLOB-ID
+ *
+ * Attribute values matching 'blob:BLOB-ID' are resolved to the ObjectURL on element upsert.
  */
 
 import { makeDomProcessor } from './dom-processor.js';
@@ -58,7 +61,7 @@ export function mountDom(wasmImports, selector) {
   // Accumulate bytes from fd_write calls (may arrive in fragments).
   let pending = '';
 
-  const processMessage = makeDomProcessor(container);
+  const processMessage = makeDomProcessor(container, () => memory);
 
   // ── fd_write interceptor ───────────────────────────────────────────────────
 

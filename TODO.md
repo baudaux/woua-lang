@@ -341,3 +341,85 @@
     - Plugs into the WASI imports object passed to `WebAssembly.instantiate`; no changes to the woua runtime
   - **`demos/svg_demo.woua`** — demo that draws an animated scene: initial shapes sent once, then a loop updates positions by resending only the changed elements (same ids, new coordinates)
 
+- [x] #73 Build-time file embedding — `(defstatic name :bytes "path/to/data")` reads a file from the host file system at **compile time** and places its raw bytes into the WAT data section; a `{ptr: i32, len: i32}` header (same layout as `:str`) is emitted immediately before the bytes, giving zero-cost access to both the raw data and a WASI-compatible iovec for `fd_write`
+  - **Syntax**: extends `defstatic` with a `:bytes` type — `(defstatic page :bytes "assets/index.html")` — consistent with `(defstatic msg :str "hello")`; path is resolved relative to the directory of the `.woua` source file being compiled; a missing file is a hard compile error with file + line reported
+  - **Compiler changes** (`expander.ts` / `env.ts`): detect `:bytes` in `defstatic`; open and read the file; emit two entries into `env.statics`: (1) an 8-byte header `{ptr_imm: i32, len_imm: i32}` at `addr`, pointing to `addr + 8`; (2) the raw file bytes starting at `addr + 8`; record `{addr, len}` in `env.consts` so accessors fold to compile-time constants
+  - **Memory adjustment**: after all statics are laid out, if `env.heapBase` exceeds `currentMemoryPages × 65536` (the value in the emitted `(memory N)` declaration), bump `N` to `ceil(env.heapBase / 65536)`; large embedded files will silently increase the module's initial memory footprint; the `-map` output should report embedded file entries with their path, address, and byte size
+  - **Access helpers**: `(static-ptr name)` → raw byte pointer (`i32`), `(static-len name)` → byte count (`i32`), `(static-iov name)` → address of the 8-byte `{ptr, len}` header (`i32`); the header address is what gets passed to `fd_write` as the `iovs` parameter since its layout matches the WASI Preview 1 `ciovec` struct exactly
+  - **Use cases**: embedding CSS/JS/HTML templates, WASM binary payloads, lookup tables from binary files, shader source strings, test fixtures — zero runtime overhead, no WASI file-system access at startup
+
+- [x] #75 DOM event subscriptions — make `/dev/dom` full-duplex so WASM writes DOM commands and reads event records back on the same fd; no second fd required
+  - **Motivation**: the current `/dev/dom` protocol is write-only (WASM → DOM); making it readable turns it into a Unix-style device where the host can push data back; the woua program keeps the one `dom-fd` it already has open and simply calls `fd_read` on it to receive events
+  - **Registration** (new `/dev/dom` write command): `<!listen ID EVENT>` — attaches a JS listener; `<!unlisten ID EVENT>` removes it; e.g. `<!listen btn click>`, `<!listen inp input>`
+  - **Delivery channel**: a SharedArrayBuffer ring buffer shared between the main thread (producer) and the worker (consumer); when a registered listener fires on the main thread, the event record is serialised into the ring and `Atomics.notify` wakes the worker; `fd_read` on `dom-fd` drains the ring into WASM linear memory
+  - **Ring buffer layout** (in SharedArrayBuffer): `{ write-idx: i32, read-idx: i32, data: u8[N] }` — lock-free SPSC queue; event records are newline-terminated text lines (same encoding as the write side): `EVENT elem-id event-type client-x client-y key-code value\n`; capacity `N` default 4 KB
+  - **Supported event types** — each record always carries all fields; unused fields are `0` / empty string:
+    - **Mouse**: `click`, `dblclick`, `mousedown`, `mouseup`, `mousemove`, `mouseenter`, `mouseleave`, `contextmenu` — `client-x`, `client-y` populated; `key-code` = mouse button (0=left, 1=middle, 2=right)
+    - **Pointer** (unifies mouse + touch + stylus): `pointerdown`, `pointermove`, `pointerup`, `pointercancel` — `client-x`, `client-y`, `key-code` = pointerId
+    - **Keyboard**: `keydown`, `keyup` — `key-code` = `event.keyCode`; `value` = `event.key` (e.g. `"a"`, `"Enter"`, `"ArrowLeft"`)
+    - **Input / form**: `input` — `value` = element's current `.value`; `change` — same; `focus`, `blur` — no extra data; `submit` — `value` = serialised form data (URL-encoded)
+    - **Scroll**: `scroll` — `client-x` = `scrollLeft`, `client-y` = `scrollTop`
+  - **`fd_read` implementation** (`wasi-min.js`): for the dom fd, block via `Atomics.wait` on the ring's `write-idx` until data is available, then copy bytes into the WASM buffer passed by the caller; non-blocking peek returns 0 bytes if ring is empty
+  - **woua-side API** (`lib/dom.woua`):
+    - `(dom-listen buf elem-id event-type)` / `(dom-unlisten buf elem-id event-type)` — emit directives into the write buffer, flushed as usual with `(dom-flush-to buf dom-fd)`
+    - `(dom-event-read dom-fd scratch-ptr scratch-cap)` — calls `fd_read` on `dom-fd`; returns a `:str` of the raw event line, or an empty string if no event is pending
+    - `DomEvent` deftype + `(dom-event-parse line ev)` — parses the text line into a structured record with fields `elem-id`, `event-type`, `client-x`, `client-y`, `key-code`, `value`
+  - **Worker changes** (`dom_worker.js`): intercept `<!listen>` / `<!unlisten>` directives from `onFdWrite`; relay as `postMessage({ type: 'listen'|'unlisten', elemId, eventType })`; allocate the SharedArrayBuffer ring on startup and pass a reference to the main thread
+  - **Main thread changes**: handle `listen`/`unlisten` messages; on event fire, encode the record and write into the ring with `Atomics.notify`
+  - **Integration with animation loop**: `(dom-event-read ...)` can be polled non-blocking at the top of each frame; for event-only apps, the blocking form suspends until the next event arrives — replaces `(poll-sleep-ns ...)`
+  - **Depends on**: `#71` (DOM rendering via `/dev/dom`)
+
+- [ ] #76 Canvas pixel buffer — bind a `<canvas>` to a WASM linear-memory buffer using `OffscreenCanvas`; the worker renders pixels directly from WASM memory with zero cross-thread copy
+  - **Motivation**: SVG handles retained-mode vector graphics; canvas handles raster — pixel shaders, image processing, procedural textures, game framebuffers; shapes/paths/text stay in SVG/DOM
+  - **OffscreenCanvas approach**: the main thread creates the visible `<canvas>` element and transfers control to the worker via `canvas.transferControlToOffscreen()`; the worker holds the `OffscreenCanvasRenderingContext2D` and calls `ctx.putImageData(new ImageData(new Uint8ClampedArray(wasmMemory.buffer, ptr, w*h*4), w, h))` directly — WASM memory is read in-place, no copy, no postMessage for pixels
+  - **Handshake**: main thread sends `{ type: 'canvas', id, offscreen }` (transferable) to the worker on `<!canvas>` directive; worker stores `Map<id, {ctx, ptr, w, h, auto}>` and calls `offscreen.getContext('2d')`
+  - **Multiple canvases** — any number of canvases can be active simultaneously, each tracked by id in the worker's map
+  - **Two modes**, selected at init time per canvas:
+    - **Auto mode** — `(dom-canvas buf id w h ptr)` emits `<!canvas ID W H PTR>`; worker registers `{ctx, ptr, w, h, auto:true}` and starts a `setInterval` loop calling `ctx.putImageData` each ~16 ms; the app writes pixels freely, display stays in sync automatically
+    - **Manual mode** — `(dom-canvas buf id w h 0)` (ptr=0) emits `<!canvas ID W H>`; worker registers `{ctx, auto:false}`; no automatic refresh; the app calls `(dom-canvas-put buf id ptr w h)` which emits `<!canvas-put ID PTR W H>`; the worker intercepts this in `onFdWrite` and calls `ctx.putImageData` immediately
+  - **Auto mode pattern**:
+    ```woua
+    (defstatic pixels :bytes[(* W (* H 4))])
+    (dom-canvas buf "screen" W H (static-ptr pixels))
+    (dom-flush-to buf dom-fd)
+    (while 1
+      (render-frame (static-ptr pixels) W H frame)
+      (set! frame (+ frame 1)))
+    ```
+  - **Manual mode pattern**:
+    ```woua
+    (let px :ptr (alloc (* W (* H 4)))
+      (dom-canvas buf "screen" W H 0)
+      (dom-flush-to buf dom-fd)
+      (while 1
+        (render-frame px W H frame)
+        (dom-canvas-put buf "screen" px W H)
+        (dom-flush-to buf dom-fd)
+        (set! frame (+ frame 1))))
+    ```
+  - **`demos/canvas_demo.woua`** — demo rendering a Mandelbrot set or plasma effect in auto mode; pixels written directly into WASM static buffer, worker's interval loop blits to screen
+  - **Depends on**: `#71` (DOM rendering via `/dev/dom`)
+
+- [x] #74 DOM blob registration for embedded binary assets — extends the `/dev/dom` protocol with a `<!blob>` directive that tells the JavaScript bridge to read a range of WASM linear memory, create a `Blob`, and register its `ObjectURL` under a named id; works in tandem with `#73` (`:bytes` embeds) so that images, fonts, audio, and other binary assets baked into the WASM binary can be referenced by DOM elements without any server fetch or base64 encoding
+  - **Protocol directive** (new `/dev/dom` command): `<!blob BLOB-ID PTR LEN MIME>` — JS reads `new Uint8Array(memory.buffer, PTR, LEN)`, creates `new Blob([slice], {type: MIME})`, calls `URL.createObjectURL(blob)`, stores the resulting URL in a registry keyed by `BLOB-ID`; the directive must be sent before any element that references the blob
+  - **Blob id references** in element directives — when the bridge encounters a `src`, `href`, or other URL attribute containing `blob:BLOB-ID` (the literal prefix `blob:` followed by the registered id), it substitutes the stored `ObjectURL` before setting the DOM attribute; this keeps the woua-side protocol free of opaque `blob:http://...` strings
+  - **woua-side helpers** (additions to `lib/dom.woua`):
+    - `(dom-blob buf blob-id ptr len mime)` — serialises the `<!blob BLOB-ID PTR LEN MIME>` directive into the buffer; `ptr` and `len` are i32 runtime values; `mime` is a `:str`
+    - `(dom-blob-static buf blob-id name mime)` — convenience form for a `:bytes` static: expands to `(dom-blob buf blob-id (static-ptr name) (static-len name) mime)` with compile-time constants for ptr and len; this is the primary usage pattern for `#73` embeds
+    - `(dom-img buf elem-id blob-id)` — creates/upserts `<img id="elem-id" src="blob:blob-id">`, relying on the bridge to resolve the id to its ObjectURL
+  - **JavaScript bridge changes** (`js/dom-processor.js`):
+    - Handle `<!blob BLOB-ID PTR LEN MIME>`: access `memory.buffer` (set via `bridge.setMemory(mem)`), create the `Blob` and `ObjectURL`, store in a `Map<string, string>` local to the processor
+    - On element upsert, before calling `setAttribute`, scan attribute values for the `blob:` prefix and substitute the stored URL; if the id is not yet registered (blob directive not yet sent), emit a console warning and leave the attribute as-is
+    - `URL.revokeObjectURL` is not called automatically — the app is responsible for cleanup if needed
+  - **Typical usage pattern** (PNG logo embedded at build time):
+    ```woua
+    (defstatic logo :bytes "assets/logo.png")   ;; #73 embed
+
+    ;; Once at startup — register the blob, then reference it in an img
+    (dom-blob-static buf "logo-blob" logo "image/png")
+    (dom-flush-to buf dom-fd)
+    (dom-img buf "my-logo" "logo-blob")
+    (dom-flush-to buf dom-fd)
+    ```
+  - **Depends on**: `#73` (`:bytes` file embedding) and `#71` (DOM rendering via `/dev/dom`)
+

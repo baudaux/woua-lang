@@ -41,6 +41,17 @@
     (Iovec/len!  __write_iov len)
     (drop (fd_write fd (as :i32 __write_iov) 1 (+ (as :i32 __write_iov) (sizeof Iovec))))))
 
+;; read: read up to len bytes from fd into [ptr, ptr+len).  Returns bytes actually read.
+;; Uses the shared __iov static scratch (same layout as write — avoid nesting read+write).
+(defmacro read (fd ptr len)
+  (let __read_iov :*Iovec (static-ptr __iov)
+    (let __read_nread :ptr (+ (as :i32 __read_iov) (sizeof Iovec))
+      (progn
+        (Iovec/base! __read_iov ptr)
+        (Iovec/len!  __read_iov len)
+        (drop (fd_read fd (as :i32 __read_iov) 1 __read_nread))
+        (i32.load __read_nread)))))
+
 ;; write-string: like write but takes a runtime str struct instead of
 ;; compile-time static-ptr/static-len.
 (defmacro write-string (fd s)

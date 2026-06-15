@@ -14,6 +14,7 @@
  *   <!style ID CSS>                           — setAttribute('style', CSS)
  *   <!transform ID T>                         — setAttribute('transform', T)
  *   <!attr ID NAME VALUE>                     — setAttribute(NAME, VALUE)
+ *   <!title TEXT>                             — document.title = TEXT
  *
  * The special id "__root" in <!style>, <!transform> and <!attr> refers to the
  * root <svg> element itself, allowing WASM code to set width/height/viewBox/style.
@@ -104,6 +105,11 @@ export function makeSvgProcessor(svg, defs) {
             el?.setAttribute(rest2.slice(0, sp2), rest2.slice(sp2 + 1));
           }
         }
+        return;
+      }
+
+      if (inner.startsWith('title ')) {
+        document.title = inner.slice(6);
         return;
       }
 

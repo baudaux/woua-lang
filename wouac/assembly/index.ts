@@ -11,10 +11,10 @@ import {
   fd_prestat_get, fd_prestat_dir_name, path_open, fd_close, fd_read, fd_write,
   errno, oflags, rights, fdflags, lookupflags, fd, prestat, prestat_dir,
 } from "@assemblyscript/wasi-shim/assembly/bindings/wasi_snapshot_preview1";
-import { Node, ListNode, SymbolNode, RegexNode,
-         TAG_LIST, TAG_SYMBOL, TAG_REGEX } from "./ast";
+import { Node, ListNode, SymbolNode, StringNode, RegexNode,
+         TAG_LIST, TAG_SYMBOL, TAG_STRING, TAG_REGEX } from "./ast";
 import { Reader } from "./reader";
-import { Env, StaticInfo, LiteralInfo } from "./env";
+import { Env, StaticInfo, LiteralInfo, FileEmbedInfo } from "./env";
 import { expandAll } from "./expander";
 import { generateModule } from "./codegen";
 import { watToWasm } from "./wasm_encoder";
@@ -150,6 +150,47 @@ function readPathString(path: string): string | null {
   heap.free(nrBuf);
   fd_close(rawFd as fd);
   return result;
+}
+
+// Read a file as raw bytes and encode them as WAT \xx hex-escape sequences.
+// Returns a FileEmbedInfo (watBytes + byteLen), or null if the file cannot be opened.
+function readPathBytesWat(path: string): FileEmbedInfo | null {
+  let rawFd = openPath(path, false);
+  if (rawFd < 0) return null;
+
+  const hexChars = "0123456789abcdef";
+  let watBytes = "";
+  let byteLen: i32 = 0;
+  let chunkSz: usize = 4096;
+  // @ts-ignore
+  let buf   = heap.alloc(chunkSz);
+  // @ts-ignore
+  let iov   = heap.alloc(8);
+  // @ts-ignore
+  let nrBuf = heap.alloc(4);
+
+  while (true) {
+    store<u32>(iov,     buf as u32);
+    store<u32>(iov + 4, chunkSz as u32);
+    // @ts-ignore
+    let ret = fd_read(rawFd as fd, iov, 1, nrBuf);
+    if (ret !== errno.SUCCESS) break;
+    let n = load<u32>(nrBuf) as i32;
+    if (n == 0) break;
+    for (let i = 0; i < n; i++) {
+      const b = load<u8>(buf + (i as usize)) as i32;
+      watBytes += "\\" + hexChars.charAt(b >> 4) + hexChars.charAt(b & 0xf);
+    }
+    byteLen += n;
+  }
+  // @ts-ignore
+  heap.free(buf);
+  // @ts-ignore
+  heap.free(iov);
+  // @ts-ignore
+  heap.free(nrBuf);
+  fd_close(rawFd as fd);
+  return new FileEmbedInfo(watBytes, byteLen);
 }
 
 // Wrap openPath for writing binary data
@@ -311,7 +352,8 @@ function readAndResolve(
 // ── Static memory map generation ─────────────────────────────────────────────
 
 function sizeOfStatic(info: StaticInfo): i32 {
-  if (!info.isScalar()) return info.len; // :string or :bytes — len is the actual byte count
+  if (info.typeName == ":bytes-file") return info.len + 8; // 8-byte iovec header + file data
+  if (!info.isScalar()) return info.len; // :*str, :bytes — len is the actual byte count
   if (info.typeName == ":i64" || info.typeName == ":f64") return 8;
   return 4; // :i32, :f32, :ptr
 }
@@ -323,6 +365,39 @@ function hexAddr(ptr: i32): string {
     s += digits.charAt((ptr >> shift) & 0xf);
   }
   return s;
+}
+
+// Pre-pass: find all (defstatic name :bytes "path") forms in the top-level form list,
+// read the referenced files as raw bytes, and store them in env.fileEmbeds keyed by the
+// raw path string as written in the source.  Must be called before expandAll.
+function preloadFileEmbeds(forms: Array<Node>, env: Env): void {
+  for (let i = 0; i < forms.length; i++) {
+    const form = forms[i];
+    if (form.tag != TAG_LIST) continue;
+    const list = form as ListNode;
+    if (list.children.length < 4) continue;
+    if (list.children[0].tag != TAG_SYMBOL) continue;
+    if ((list.children[0] as SymbolNode).name != "defstatic") continue;
+    if (list.children[2].tag != TAG_SYMBOL) continue;
+    if ((list.children[2] as SymbolNode).name != ":bytes") continue;
+    if (list.children[3].tag != TAG_STRING) continue;
+
+    const filePath = (list.children[3] as StringNode).value;
+    if (env.fileEmbeds.has(filePath)) continue; // already loaded (duplicate defstatic)
+
+    const resolvedPath = env.sourceDir.length > 0
+      ? env.sourceDir + filePath
+      : filePath;
+
+    const info = readPathBytesWat(resolvedPath);
+    if (info == null) {
+      const sname = list.children[1].tag == TAG_SYMBOL
+        ? (list.children[1] as SymbolNode).name : "?";
+      env.errors.push("defstatic :bytes: cannot read '" + resolvedPath + "' for '" + sname + "'");
+    } else {
+      env.fileEmbeds.set(filePath, info);
+    }
+  }
 }
 
 // Build a map file: one line per named static, sorted by address.
@@ -442,10 +517,13 @@ export function _start(): void {
   env.noPeephole = noPeephole;
 
   const inputDir = inputArg != "" ? dirName(inputArg) : "";
+  env.sourceDir  = inputDir; // base dir used to resolve :bytes file paths
   const included = new Set<string>();
   if (inputArg != "") included.add(inputArg);
 
   const forms = readAndResolve(source as string, inputArg != "" ? inputArg : "<stdin>", inputDir, libDir, included, env);
+
+  preloadFileEmbeds(forms, env); // pre-read :bytes "file" embeds before expansion
 
   const expanded = expandAll(forms, env);
 

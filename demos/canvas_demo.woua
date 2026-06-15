@@ -1,0 +1,47 @@
+;; canvas_demo.woua — two animated canvases:
+;;   screen  (manual mode) — XOR plasma; WASM calls dom-canvas-put each frame.
+;;   screen2 (auto mode)   — inverted XOR plasma; main-thread rAF reads WASM memory directly.
+;; lib/dom.woua already declares (shared-memory), so WASM linear memory is a
+;; SharedArrayBuffer — the main thread can read screen2's buffer via rAF with no postMessage.
+
+(include html)
+
+(defconst W 320)
+(defconst H 240)
+
+;; Static RGBA buffers in WASM linear memory (320*240*4 = 307200 bytes each).
+(defstatic pixels  :bytes 307200)
+(defstatic pixels2 :bytes 307200)
+
+(defn main () :void
+  (let* ((dom-fd :i32     (open-file "/dev/dom" 0))
+         (buf    :*DomBuf (dom-buf-new 4096))
+         (frame  :i32     0))
+
+    ;; ── Create canvases ───────────────────────────────────────────────────
+    ;; screen: manual mode (ptr=0) — WASM pushes each frame via dom-canvas-put.
+    (dom-canvas buf "screen" W H 0)
+    ;; screen2: auto mode — main-thread rAF reads WASM memory at pixels2 directly.
+    (dom-canvas buf "screen2" W H (static-ptr pixels2))
+    (dom-flush-to buf dom-fd)
+
+    ;; ── Render loop ───────────────────────────────────────────────────────
+    (while 1
+      (for y 0 H
+        (for x 0 W
+          (let* ((off   :i32 (+ (* y W) x))
+                 (addr  :i32 (+ (static-ptr pixels)  (* 4 off)))
+                 (addr2 :i32 (+ (static-ptr pixels2) (* 4 off))))
+            ;; screen: XOR plasma
+            (i32.store8 addr          (& (^ x (^ y frame))               255))
+            (i32.store8 (+ addr 1)    (& (^ x (^ (>> y 1) (>> frame 1))) 255))
+            (i32.store8 (+ addr 2)    (& (^ (>> x 1) (^ y frame))        255))
+            (i32.store8 (+ addr 3)    255)
+            ;; screen2: inverted palette, slower drift
+            (i32.store8 addr2         (& (^ (+ x y) (>> frame 2))        255))
+            (i32.store8 (+ addr2 1)   (& (^ (* x y) (>> frame 3))        255))
+            (i32.store8 (+ addr2 2)   (& (^ (- x y) (>> frame 2))        255))
+            (i32.store8 (+ addr2 3)   255))))
+      (dom-canvas-put buf "screen" (static-ptr pixels) W H)
+      (dom-flush-to buf dom-fd)
+      (set! frame (+ frame 1)))))

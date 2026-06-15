@@ -5,13 +5,12 @@
   <style>
     body  { font-family: sans-serif; margin: 2rem; background: #f0f2f5; }
     h2    { margin-bottom: 0.5rem; }
-    #app-container { background: #fff; border-radius: 10px; padding: 0.25rem;
-                     box-shadow: 0 2px 10px rgba(0,0,0,0.10); display: inline-block; }
+    #app-container { display: inline-block; }
     #page-status { margin-top: 0.75rem; color: #555; font-size: 0.9rem; }
   </style>
 </head>
 <body>
-  <h2>woua DOM demo</h2>
+  <h2>woua input demo</h2>
   <div id="app-container"></div>
   <p id="page-status">Loading…</p>
 
@@ -26,7 +25,7 @@
       { type: 'module' }
     );
     worker.onmessage = makeWorkerHandler(root, status);
-    worker.postMessage({ type: 'start', wasmUrl: 'out/dom_demo.wasm' });
+    worker.postMessage({ type: 'start', wasmUrl: 'out/input_demo.wasm' });
     status.textContent = 'Running…';
   </script>
 </body>

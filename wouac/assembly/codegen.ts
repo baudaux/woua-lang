@@ -342,11 +342,15 @@ function assembleModule(env: Env): string {
   }
   if (env.imports.length > 0) out += "\n";
 
-  // Linear memory — shared when svg is used (worker↔main-thread access)
+  // Linear memory — auto-sized to cover all statics; minimum 1 page (64 KiB).
+  // Large embedded files push env.memoryOffset past 64 KiB, so bump accordingly.
+  const alignedStaticTop = (env.memoryOffset + 7) & ~7;
+  const neededPages = ((alignedStaticTop + 65535) >>> 16);
+  const initPages   = neededPages > 1 ? neededPages : 1;
   if (env.usesSvg) {
-    out += "  (memory 1 65536 shared)\n";
+    out += "  (memory " + initPages.toString() + " 65536 shared)\n";
   } else {
-    out += "  (memory 1)\n";
+    out += "  (memory " + initPages.toString() + ")\n";
   }
   out += '  (export "memory" (memory 0))\n\n';
 

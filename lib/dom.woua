@@ -17,6 +17,18 @@
 ;;   <!class ID CLASSNAME>\n                  — set className on element ID
 ;;   <!text ID TEXT>\n                        — set textContent on element ID
 ;;   <!attr ID NAME VALUE>\n                  — set arbitrary attribute on element ID
+;;   <!title TEXT>\n                         — set document.title
+;;   <!css TEXT>\n                           — append TEXT to <style id="__wasm-css"> in <head>
+;;   <!blob BLOB-ID PTR LEN MIME>\n          — register binary asset as Blob URL; attribute values
+;;                                             matching "blob:BLOB-ID" are resolved to the ObjectURL
+;;   <!listen ID EVENT>\n                    — attach JS event listener on element ID
+;;   <!unlisten ID EVENT>\n                  — remove event listener
+;;   <!getval ID>\n                          — ask main thread to push ID’s .value as a
+;;                                             synthetic “val” event into the ring buffer
+;;
+;; Event records read back from dom-fd via (dom-event-read) are tab-separated lines:
+;;   EID \t ETYPE \t CLIENT-X \t CLIENT-Y \t KEY-CODE \t VALUE \n
+;; ETYPE is “val” for <!getval> responses (first byte ‘v’ = 118).
 ;;
 ;; The special id "__root" in directives refers to the root container element.
 ;;
@@ -340,3 +352,290 @@
 ;; (dom-root-attr buf name value) — set an attribute on the root container element.
 (defmacro dom-root-attr (buf name value)
   (dom-attr buf "__root" name value))
+
+;; (dom-title buf text) — set the browser tab / window title (document.title).
+(defmacro dom-title (buf text)
+  (progn
+    (__dom-str buf "<!title ")
+    (__dom-str buf text)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-css-raw buf ptr len) — send raw CSS bytes from WASM memory to the bridge.
+;; The worker reads LEN bytes at PTR, decodes them as UTF-8, and injects the text into
+;; <style id="__wasm-css">.  Suitable for large CSS loaded from an embedded file.
+(defmacro dom-css-raw (buf ptr len)
+  (progn
+    (__dom-str buf "<!css-raw ")
+    (__dom-int buf ptr)
+    (__dom-byte buf 32)
+    (__dom-int buf len)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-css-static buf name) — convenience form for a :bytes static.
+;; Expands to (dom-css-raw buf (static-ptr name) (static-len name)).
+;; name must be a (defstatic name :bytes "file.css") symbol.
+(defmacro dom-css-static (buf name)
+  (dom-css-raw buf (static-ptr name) (static-len name)))
+
+;; (dom-css buf rule) — append a CSS rule / block to the page's <style id="__wasm-css">.
+;; The style element is created in <head> on first use.  Call once at startup to
+;; define class styles, keyframe animations, etc., then use (dom-class) to apply them.
+;; Each call appends one line; flush with (dom-flush-to) to send to the bridge.
+(defmacro dom-css (buf rule)
+  (progn
+    (__dom-str buf "<!css ")
+    (__dom-str buf rule)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; ── Blob registration (requires #73 build-time :bytes embedding) ─────────────
+
+;; ── Event subscription ─────────────────────────────────────────────────────
+
+;; DOM event type codes — unique integers sent in the ring buffer ETYPE field.
+;; The JS bridge maps event names to these codes before writing events.
+;; EVT-NONE is returned by dom-event-get when no event arrived (timeout).
+(defconst EVT-NONE       0)
+(defconst EVT-CLICK      1)
+(defconst EVT-DBLCLICK   2)
+(defconst EVT-MOUSEDOWN  3)
+(defconst EVT-MOUSEUP    4)
+(defconst EVT-MOUSEMOVE  5)
+(defconst EVT-KEYDOWN    6)
+(defconst EVT-KEYUP      7)
+(defconst EVT-KEYPRESS   8)
+(defconst EVT-INPUT      9)
+(defconst EVT-CHANGE    10)
+(defconst EVT-FOCUS     11)
+(defconst EVT-BLUR      12)
+(defconst EVT-SUBMIT    13)
+(defconst EVT-RESET     14)
+(defconst EVT-SCROLL    15)
+(defconst EVT-VAL       16)  ;; synthetic: response to <!getval>
+
+;; DomEvent — fixed-size record filled by (dom-event-parse).
+;; eid-ptr/eid-len point into the scratch buffer (no copy).
+;; ety holds the EVT-* integer code sent by the JS bridge.
+;; val-ptr/val-len point into the scratch buffer; call dom-urldecode before use.
+(deftype DomEvent
+  (eid-ptr  :ptr)
+  (eid-len  :i32)
+  (ety      :i32)
+  (client-x :i32)
+  (client-y :i32)
+  (key-code :i32)
+  (val-ptr  :ptr)
+  (val-len  :i32))
+
+;; (dom-listen buf elem-id evt-code) — emit <!listen ID CODE> directive.
+;; evt-code is an EVT-* integer constant.
+(defmacro dom-listen (buf elem-id evt-code)
+  (progn
+    (__dom-str buf "<!listen ")
+    (__dom-str buf elem-id)
+    (__dom-byte buf 32)
+    (__dom-int buf evt-code)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-unlisten buf elem-id evt-code) — emit <!unlisten ID CODE> directive.
+;; evt-code is an EVT-* integer constant.
+(defmacro dom-unlisten (buf elem-id evt-code)
+  (progn
+    (__dom-str buf "<!unlisten ")
+    (__dom-str buf elem-id)
+    (__dom-byte buf 32)
+    (__dom-int buf evt-code)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-getval buf id) — ask the main thread for element id’s current .value.
+;; The main thread writes a synthetic "val" event to the ring buffer;
+;; the app receives it on the next dom-event-read call (ETYPE first byte 'v' = 118).
+(defmacro dom-getval (buf id)
+  (progn
+    (__dom-str buf "<!getval ")
+    (__dom-str buf id)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-event-get dom-fd scratch cap timeout-ns ev) → EVT-* :i32
+;; Read one event, parse it into ev, and return its type code.
+;; Returns EVT-NONE (0) if no event arrived within the timeout (ev is unchanged).
+(defn dom-event-get (dom-fd :i32 scratch :ptr cap :i32 timeout-ns :i64 ev :*DomEvent) :i32
+  (let __deg-n :i32 (dom-event-read dom-fd scratch cap timeout-ns)
+    (if (> __deg-n 0)
+      (progn
+        (dom-event-parse scratch __deg-n ev)
+        (DomEvent/ety ev))
+      EVT-NONE)))
+
+;; (dom-event-read dom-fd scratch cap timeout-ns) → bytes-read :i32
+;; Read one event record from dom-fd into scratch[0..cap).
+;;   timeout-ns =  0 → non-blocking: return 0 immediately if no data
+;;   timeout-ns = -1 → block indefinitely until an event arrives
+;;   timeout-ns >  0 → block up to timeout-ns nanoseconds, then return 0
+;; fd_read blocks by itself (Atomics.wait), so timeout=-1 is a plain read.
+;; All other timeouts use poll-fd-read to gate the read.
+;; scratch must be at least cap bytes; cap >= 256 recommended.
+(defn dom-event-read (dom-fd :i32 scratch :ptr cap :i32 timeout-ns :i64) :i32
+  (if (= timeout-ns -1i64)
+    (read dom-fd scratch cap)
+    (if (> (poll-fd-read dom-fd timeout-ns) 0)
+      (read dom-fd scratch cap)
+      0)))
+
+;; Internal: decode a single hex digit character to its nibble value.
+(defn __dom-hex-nibble (c :i32) :i32
+  (if (& (>= c 48) (<= c 57))
+    (- c 48)
+    (if (& (>= c 65) (<= c 70))
+      (- c 55)
+      (if (& (>= c 97) (<= c 102))
+        (- c 87)
+        0))))
+
+;; (dom-urldecode buf len) → decoded-len :i32
+;; Decode %XX sequences in-place in buf[0..len).  Returns new byte length.
+;; Safe to call on DomEvent/val-ptr/val-len from dom-event-parse.
+(defn dom-urldecode (buf :ptr len :i32) :i32
+  (let ri :i32 0
+    (let wi :i32 0
+      (while (< ri len)
+        (let b :i32 (i32.load8_u (+ buf ri))
+          (if (& (= b 37) (< (+ ri 2) len))
+            (let hi :i32 (i32.load8_u (+ buf (+ ri 1)))
+              (let lo :i32 (i32.load8_u (+ buf (+ ri 2)))
+                (progn
+                  (i32.store8 (+ buf wi)
+                    (+ (* (__dom-hex-nibble hi) 16) (__dom-hex-nibble lo)))
+                  (set! ri (+ ri 3))
+                  (set! wi (+ wi 1)))))
+            (progn
+              (i32.store8 (+ buf wi) b)
+              (set! ri (+ ri 1))
+              (set! wi (+ wi 1))))))
+      wi)))
+
+;; Internal: parse ASCII decimal integer at p/l.
+(defn __atoi (p :ptr l :i32) :i32
+  (let result :i32 0
+    (let i :i32 0
+      (let neg :i32 0
+        (progn
+          (if (& (> l 0) (= (i32.load8_u p) 45))
+            (progn (set! neg 1) (set! i 1))
+            (drop 0))
+          (while (< i l)
+            (set! result (+ (* result 10) (- (i32.load8_u (+ p i)) 48)))
+            (set! i (+ i 1)))
+          (if (= neg 1) (* -1 result) result))))))
+
+;; (dom-event-parse lp ll ev) — parse an event record into a DomEvent struct.
+;; lp/ll point to the raw bytes returned by dom-event-read.
+;; eid-ptr/val-ptr point into the record buffer (no copy); ety is an EVT-* integer code.
+(defn dom-event-parse (lp :ptr ll :i32 ev :*DomEvent) :void
+  (let i :i32 0
+    (let field :i32 0
+      (let start :i32 0
+        (while (< i ll)
+          (let b :i32 (i32.load8_u (+ lp i))
+            (if (| (= b 9) (= b 10))
+              (let flen :i32 (- i start)
+                (progn
+                  (if (= field 0)
+                    (progn
+                      (DomEvent/eid-ptr! ev (+ lp start))
+                      (DomEvent/eid-len! ev flen))
+                    (drop 0))
+                  (if (= field 1)
+                    (DomEvent/ety! ev (__atoi (+ lp start) flen))
+                    (drop 0))
+                  (if (= field 2)
+                    (DomEvent/client-x! ev (__atoi (+ lp start) flen))
+                    (drop 0))
+                  (if (= field 3)
+                    (DomEvent/client-y! ev (__atoi (+ lp start) flen))
+                    (drop 0))
+                  (if (= field 4)
+                    (DomEvent/key-code! ev (__atoi (+ lp start) flen))
+                    (drop 0))
+                  (if (= field 5)
+                    (progn
+                      (DomEvent/val-ptr! ev (+ lp start))
+                      (DomEvent/val-len! ev flen))
+                    (drop 0))
+                  (set! field (+ field 1))
+                  (set! start (+ i 1))))
+              (drop 0)))
+          (set! i (+ i 1)))))))
+
+;; (dom-blob buf blob-id ptr len mime) — register a binary asset as a Blob URL.
+;; Emits a <!blob BLOB-ID PTR LEN MIME> directive; the JS bridge reads LEN bytes
+;; from WASM linear memory at PTR, creates a Blob with the given MIME type, and
+;; stores the resulting ObjectURL under BLOB-ID.  Must be flushed to the dom fd
+;; before any element that references this blob via blob:BLOB-ID in an attribute.
+(defmacro dom-blob (buf blob-id ptr len mime)
+  (progn
+    (__dom-str buf "<!blob ")
+    (__dom-str buf blob-id)
+    (__dom-byte buf 32)
+    (__dom-int buf ptr)
+    (__dom-byte buf 32)
+    (__dom-int buf len)
+    (__dom-byte buf 32)
+    (__dom-str buf mime)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-blob-static buf blob-id name mime) — convenience form for a :bytes static.
+;; Expands to (dom-blob ... (static-ptr name) (static-len name) ...) so ptr and
+;; len fold to compile-time constants.  name must be a defstatic :bytes "file" symbol.
+(defmacro dom-blob-static (buf blob-id name mime)
+  (dom-blob buf blob-id (static-ptr name) (static-len name) mime))
+
+;; (dom-canvas buf id w h ptr) — create/upsert a <canvas> element.
+;; ptr=0  → manual mode: call dom-canvas-put explicitly to push each frame.
+;; ptr≠0  → auto mode: JS rAF loop reads WASM memory at ptr each frame
+;;           (requires shared WASM memory; use manual mode for standard builds).
+(defmacro dom-canvas (buf id w h ptr)
+  (progn
+    (__dom-str buf "<!canvas ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-int buf w)
+    (__dom-byte buf 32)
+    (__dom-int buf h)
+    (__dom-byte buf 32)
+    (__dom-int buf ptr)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-canvas-put buf id ptr w h) — push one RGBA frame to the canvas (manual mode).
+;; ptr must point to w*h*4 bytes of RGBA data in WASM linear memory.
+;; The worker copies the bytes and sends them to the main-thread canvas context.
+(defmacro dom-canvas-put (buf id ptr w h)
+  (progn
+    (__dom-str buf "<!canvas-put ")
+    (__dom-str buf id)
+    (__dom-byte buf 32)
+    (__dom-int buf ptr)
+    (__dom-byte buf 32)
+    (__dom-int buf w)
+    (__dom-byte buf 32)
+    (__dom-int buf h)
+    (__dom-byte buf 62)
+    (__dom-byte buf 10)))
+
+;; (dom-img buf elem-id blob-id) — upsert <img id="elem-id" src="blob:blob-id"/>.
+;; The JS bridge resolves blob:BLOB-ID to the registered ObjectURL before setting
+;; the src attribute.  Ensure dom-blob or dom-blob-static has been flushed first.
+(defmacro dom-img (buf elem-id blob-id)
+  (progn
+    (__dom-open-tag buf "img" elem-id)
+    (__dom-str buf " src=\"blob:")
+    (__dom-str buf blob-id)
+    (__dom-byte buf 34)
+    (__dom-close-self buf)))

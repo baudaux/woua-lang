@@ -1,0 +1,54 @@
+;; input_demo.woua — DOM event demo: text input with live preview and validation
+;;
+;; Shows dom-listen + dom-urldecode working together:
+;;   - 'input' event on the text field → live preview updates on every keystroke
+;;   - 'click' event on the button     → validated result displayed
+;;
+;; Event loop blocks forever on dom-event-read; wakes only when an event arrives.
+
+(include html)
+
+(defconst SCRATCH-CAP 512)
+
+(defstatic styles :bytes "assets/input_demo.css")
+
+(defn main ()
+  (let* ((dom-fd  :i32       (open-file "/dev/dom" 0))
+         (buf     :*DomBuf   (dom-buf-new 4096))
+         (scratch :ptr       (alloc SCRATCH-CAP))
+         (ev      :*DomEvent (alloc (sizeof DomEvent))))
+
+    ;; ── Inject stylesheet then build layout ─────────────────────────────────
+    (dom-css-static buf styles)
+    (dom-flush-to buf dom-fd)
+
+    (html buf dom-fd
+      (div "app"
+        (h1 "title" "Input demo")
+        (input "inp"
+               (attr "type" "text")
+               (attr "placeholder" "type here..."))
+        (button "btn" "Validate")
+        (p "preview" "start typing...")
+        (p "result" "")))
+
+    ;; ── Register listeners ────────────────────────────────────────────────────
+    (dom-listen buf "inp" EVT-INPUT)
+    (dom-listen buf "btn" EVT-CLICK)
+    (dom-flush-to buf dom-fd)
+
+    ;; ── Event loop: block until an event arrives ──────────────────────────────
+    (while 1
+      (let ety :i32 (dom-event-get dom-fd scratch SCRATCH-CAP -1i64 ev)
+        (if (!= ety EVT-NONE)
+          (let dl :i32 (dom-urldecode (DomEvent/val-ptr ev) (DomEvent/val-len ev))
+              (let vp :ptr (DomEvent/val-ptr ev)
+                (cond
+                  ((= ety EVT-INPUT)
+                    (dom-text buf "preview" (values vp dl)))
+                  ((= ety EVT-CLICK)
+                    (dom-getval buf "inp"))
+                  (else
+                    (dom-text buf "result"
+                      (strfmt "Validated: %s" (values vp dl)))))
+                (dom-flush-to buf dom-fd))))))))

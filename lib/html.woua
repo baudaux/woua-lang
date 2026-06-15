@@ -37,6 +37,9 @@
 ;; Leaf elements (second argument is text content, then optional attr forms):
 ;;   h1..h6, p, span, li, td, th, pre, code, button, label, a
 ;;
+;; Blob-image element (second argument is blob-id registered via dom-blob / dom-blob-static):
+;;   img
+;;
 ;; Update variant:
 ;;   (html-update buf dom-fd ...)  — same syntax but emits only text/attr update
 ;;   commands; element-creation calls are omitted.  Use inside animation loops
@@ -153,8 +156,8 @@
     (__dom-byte (i32.load __html-buf) 62)
     (__dom-byte (i32.load __html-buf) 10)))
 
-;; (h:attr "attr-name" val-str)
-(defmacro h:attr (name val)
+;; (attr "attr-name" val-str)  — also available as (h:attr ...) for legacy code
+(defmacro attr (name val)
   (progn
     (__dom-str (i32.load __html-buf) "<!attr ")
     (__html-write-cur-id (i32.load __html-buf))
@@ -164,6 +167,8 @@
     (__dom-str (i32.load __html-buf) val)
     (__dom-byte (i32.load __html-buf) 62)
     (__dom-byte (i32.load __html-buf) 10)))
+
+(defmacro h:attr (name val) (attr name val))
 
 ;; ── Container element helper ──────────────────────────────────────────────────
 ;;
@@ -240,3 +245,40 @@
 (defmacro button (id text ...rest) (__html-leaf "button" id text rest))
 (defmacro label  (id text ...rest) (__html-leaf "label"  id text rest))
 (defmacro a      (id text ...rest) (__html-leaf "a"      id text rest))
+
+;; ── Void element helper (no text content, no children; only attr sub-forms) ──
+;;
+;; Void elements: input, hr, br, etc.
+
+(defmacro __html-void (tag id rest)
+  (let __hv-id :str id
+    (progn
+      (__dom-open-tag (i32.load __html-buf) tag __hv-id)
+      (__dom-close-self (i32.load __html-buf))
+      (i32.store __html-cur-p (str/ptr __hv-id))
+      (i32.store __html-cur-l (str/len __hv-id))
+      (macro-do rest))))
+
+(defmacro input    (id ...rest) (__html-void "input"    id rest))
+(defmacro textarea (id ...rest) (__html-void "textarea" id rest))
+(defmacro hr       (id ...rest) (__html-void "hr"       id rest))
+
+;; ── Blob-image element ───────────────────────────────────────────────────────
+;;
+;; (img id blob-id ...rest) — upsert <img id="ID" src="blob:BLOB-ID"/>.
+;; blob-id must have been registered with dom-blob or dom-blob-static before
+;; this form is flushed to the dom fd.
+
+(defmacro __html-img (id blob-id rest)
+  (let __hi-id :str id
+    (progn
+      (__dom-open-tag (i32.load __html-buf) "img" __hi-id)
+      (__dom-str (i32.load __html-buf) " src=\"blob:")
+      (__dom-str (i32.load __html-buf) blob-id)
+      (__dom-byte (i32.load __html-buf) 34)
+      (__dom-close-self (i32.load __html-buf))
+      (i32.store __html-cur-p (str/ptr __hi-id))
+      (i32.store __html-cur-l (str/len __hi-id))
+      (macro-do rest))))
+
+(defmacro img (id blob-id ...rest) (__html-img id blob-id rest))

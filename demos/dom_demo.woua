@@ -10,12 +10,20 @@
 ;;   const worker = new Worker('./dom_worker.js', { type: 'module' });
 ;;   const process = makeDomProcessor(document.getElementById('app'));
 ;;   worker.onmessage = ({ data }) => {
-;;     if (data.type === 'dom') process(data.line);
+;;     if (data.type === 'blob') {
+;;       const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
+;;       process.registerBlob(data.blobId, url);
+;;     } else if (data.type === 'dom') process(data.line);
 ;;   };
 ;;   worker.postMessage({ type: 'start', wasmUrl: 'out/dom_demo.wasm' });
 
 (include html)
 (include svg)
+
+;; Build-time embedded dog icon (72×72 px PNG — Twemoji 🐶, MIT licence)
+(defstatic dog    :bytes "assets/dog.png")
+;; Build-time embedded stylesheet
+(defstatic styles :bytes "assets/styles.css")
 
 ;; Frame delay: 80 ms ≈ 12 fps
 (defconst FRAME-NS 80000000)
@@ -25,14 +33,27 @@
 
 (defn make-cell (i :i32) :void
   (span (strfmt "cell%d" i) "0"
-        (style (strfmt "display:block;padding:22px 0;text-align:center;font-size:1.7rem;font-family:monospace;font-weight:bold;color:#fff;border-radius:8px;background:hsl(%d,65%%,52%%)" (* i 40)))))
+        (class "cell")
+        (style (strfmt "background:hsl(%d,65%%,52%%)" (* i 40)))))
+
+(defconst EVT-SCRATCH-CAP 256)
 
 (defn main ()
-  (let* ((dom-fd :i32     (open-file "/dev/dom" 0))
-         (buf    :*DomBuf  (dom-buf-new 8192))
-         (sbuf   :*SvgBuf  (svg-buf-new 2048))
-         (frame  :i32      0)
-         (vals   :i32[NCELLS]))
+  (let* ((dom-fd  :i32      (open-file "/dev/dom" 0))
+         (buf     :*DomBuf  (dom-buf-new 8192))
+         (sbuf    :*SvgBuf  (svg-buf-new 2048))
+         (frame   :i32      0)
+         (vals    :i32[NCELLS])
+         (scratch :ptr      (alloc EVT-SCRATCH-CAP))
+         (ev      :*DomEvent (alloc (sizeof DomEvent))))
+
+    ;; ── Register blob assets before building layout ─────────────────────────
+    ;; The <!blob> directive must reach the JS bridge before any element that
+    ;; references it via blob:dog, so flush it first.
+    (dom-blob-static buf "dog" dog "image/png")
+    (dom-title buf "woua DOM demo")
+    (dom-css-static buf styles)
+    (dom-flush-to buf dom-fd)
 
     ;; ── Build initial layout using the html macro ─────────────────────────────
 
@@ -42,10 +63,22 @@
             (style "margin:0 0 0.2rem;color:#2c3e50;font-size:1.6rem;"))
         (p "subtitle" "Live counter board — running in WebAssembly"
            (style "margin:0 0 1rem;color:#7f8c8d;font-size:0.9rem;"))
+        (img "dog-icon" "dog"
+             (class "dog"))
         (div "grid"
              (style "display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:1rem;")
           (for i 0 NCELLS
-            (make-cell i)))))
+            (make-cell i)))
+        (p "event-log" "click a cell…"
+           (style "margin:0 0 0.4rem;color:#e67e22;font-size:0.85rem;font-family:monospace;"))
+        (p "status" "Frame: 0"
+           (style "margin:0;color:#aaa;font-size:0.78rem;font-family:monospace;"))))
+
+    ;; ── Register event listeners ────────────────────────────────────────────
+    (for i 0 NCELLS
+      (dom-listen buf (strfmt "cell%d" i) EVT-CLICK))
+    (dom-listen buf "app" EVT-MOUSEMOVE)
+    (dom-flush-to buf dom-fd)
 
     ;; SVG bar chart — manually added after the html flush.
     ;; dom-parent re-scopes into app; dom-svg creates the container;
@@ -66,15 +99,15 @@
         (strfmt "hsl(%d,65%%,52%%)" (* i 40))))
     (svg-flush-to sbuf dom-fd)
 
-    ;; Status bar
-    (dom-parent buf "app")
-    (dom-p buf "status" "Frame: 0")
-    (dom-style buf "status" "margin:0;color:#aaa;font-size:0.78rem;font-family:monospace;")
-    (dom-flush-to buf dom-fd)
-
-    ;; ── Animation loop ────────────────────────────────────────────────
+    ;; ── Animation loop: block up to FRAME-NS for an event, then animate ─────
     (while 1
-      (poll-sleep-ns (as :i64 FRAME-NS))
+      (let ety :i32 (dom-event-get dom-fd scratch EVT-SCRATCH-CAP (as :i64 FRAME-NS) ev)
+        (if (!= ety EVT-NONE)
+          (if (= ety EVT-MOUSEMOVE)
+            (dom-text buf "event-log"
+              (strfmt "mouse: %d, %d" (DomEvent/client-x ev) (DomEvent/client-y ev)))
+            (dom-text buf "event-log"
+              (strfmt "click: %s" (values (DomEvent/eid-ptr ev) (DomEvent/eid-len ev))))))
       (set! frame (+ frame 1))
 
       ;; Increment each counter by its index + 1
@@ -99,4 +132,4 @@
       (dom-text buf "status" (strfmt "Frame: %d" frame))
 
       (dom-flush-to buf dom-fd)
-      (svg-flush-to sbuf dom-fd))))
+      (svg-flush-to sbuf dom-fd)))))

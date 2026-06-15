@@ -1,0 +1,22 @@
+.cell {
+  display: block;
+  padding: 22px 0;
+  text-align: center;
+  font-size: 1.7rem;
+  font-family: monospace;
+  font-weight: bold;
+  color: #fff;
+  border-radius: 8px;
+  transition: background .4s, transform .15s;
+}
+.cell:hover {
+  transform: scale(1.06);
+  cursor: default;
+}
+.dog {
+  display: block;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 0.75rem;
+  image-rendering: pixelated;
+}

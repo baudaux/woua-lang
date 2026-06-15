@@ -4,7 +4,7 @@
 
 import { Node, ListNode, SymbolNode, StringNode, IntNode, FloatNode,
          TAG_INT, TAG_FLOAT, TAG_SYMBOL, TAG_STRING, TAG_LIST, TAG_COMMENT } from "./ast";
-import { Env, StaticInfo, TypeInfo, FieldInfo } from "./env";
+import { Env, StaticInfo, TypeInfo, FieldInfo, FileEmbedInfo } from "./env";
 import {
   watI32Const, watF32Const, watF64Const,
   watI32Store, watI32Store8, watI32Load, watI32Load8u,
@@ -83,9 +83,30 @@ export function expandDefstatic(args: Array<Node>, env: Env): string {
       return "";
     }
 
-    // :bytes — reserve N zeroed bytes, 8-byte aligned so embedded i32/i64/ptr fields work correctly
+    // :bytes "file" — embed a file at compile time: 8-byte {ptr,len} iovec header + raw bytes.
+    // :bytes N      — reserve N zeroed bytes (existing form, no header).
     if (typeName == ":bytes") {
-      if (args.length < 3) return watError("defstatic :bytes requires a size");
+      if (args.length < 3) return watError("defstatic :bytes requires a size or file path");
+      if (args[2].tag == TAG_STRING) {
+        const filePath = (args[2] as StringNode).value;
+        if (!env.fileEmbeds.has(filePath))
+          return watError("defstatic :bytes: file not preloaded: '" + filePath + "'");
+        const embedInfo = env.fileEmbeds.get(filePath);
+        const len     = embedInfo.byteLen;
+        const hdrPtr  = env.allocate(8, 4);
+        const dataPtr = env.allocate(len > 0 ? len : 1, 1);
+        env.dataEntries.push(
+          "(data (i32.const " + hdrPtr.toString() + ") \""
+          + encodeI32LEBytes(dataPtr) + encodeI32LEBytes(len) + "\")"
+        );
+        if (len > 0) {
+          env.dataEntries.push(
+            "(data (i32.const " + dataPtr.toString() + ") \"" + embedInfo.watBytes + "\")"
+          );
+        }
+        env.statics.set(name, new StaticInfo(hdrPtr, len, ":bytes-file"));
+        return "";
+      }
       const size = i32((args[2] as IntNode).value);
       const ptr  = env.allocate(size, 8);
       env.statics.set(name, new StaticInfo(ptr, size, ":bytes"));

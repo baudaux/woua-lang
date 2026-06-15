@@ -23,6 +23,13 @@
  *     onFdWrite(fd, text) {
  *       return false; // fall back to default (console.log for 1/2)
  *     },
+ *
+ *     // Called when fd_read is invoked on a virtual fd.
+ *     // Write up to len bytes into WASM memory at ptr; return bytes written.
+ *     // May block (Atomics.wait) — only safe inside a Web Worker.
+ *     onFdRead(fd, ptr, len) {
+ *       return 0;
+ *     },
  *   });
  *
  *   // Instantiate your WASM module using wasi.wasiImport:
@@ -41,7 +48,7 @@ const ENOTSUP  = 58;
  * @param {{ onFdWrite?: (fd: number, text: string) => boolean }} [opts]
  * @returns {{ wasiImport: object, setMemory: (mem: WebAssembly.Memory) => void }}
  */
-export function makeWasi({ onFdWrite, preopens = [], onPathOpen } = {}) {
+export function makeWasi({ onFdWrite, onFdRead, onPollFdRead, preopens = [], onPathOpen } = {}) {
   let memory;
 
   function v()  { return new DataView(memory.buffer); }
@@ -114,8 +121,25 @@ export function makeWasi({ onFdWrite, preopens = [], onPathOpen } = {}) {
       return ESUCCESS;
     },
 
+    // ── fd_read ───────────────────────────────────────────────────────────────
+    fd_read(fd, iovs, iovsLen, nread) {
+      if (!onFdRead) return ENOTSUP;
+      const dv = v();
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const ptr = dv.getUint32(iovs + i * 8,     true);
+        const len = dv.getUint32(iovs + i * 8 + 4, true);
+        if (len === 0) continue;
+        const n = onFdRead(fd, ptr, len);
+        if (n < 0) { dv.setUint32(nread, total, true); return EBADF; }
+        total += n;
+        if (n < len) break; // short read — stop filling remaining iovs
+      }
+      dv.setUint32(nread, total, true);
+      return ESUCCESS;
+    },
+
     // ── Unimplemented fd operations ──────────────────────────────────────────
-    fd_read:               () => ENOTSUP,
     fd_close:              () => ESUCCESS,
     fd_seek:               () => ENOTSUP,
     fd_tell:               () => ENOTSUP,
@@ -180,50 +204,69 @@ export function makeWasi({ onFdWrite, preopens = [], onPathOpen } = {}) {
     sock_shutdown: () => ENOTSUP,
 
     // ── Poll ─────────────────────────────────────────────────────────────────
-    // Minimal implementation: only handles a single clock subscription (sleep).
-    // Layout of one subscription (48 bytes, little-endian):
+    // Subscription layout (48 bytes, little-endian):
     //   +0  userdata i64
-    //   +8  tag      u8  (0 = clock)
-    //   +9  padding  7 bytes
-    //   +16 clock_id u32 (0=realtime, 1=monotonic)
-    //   +20 padding  4 bytes
-    //   +24 timeout  i64 (nanoseconds, relative when flags=0)
-    //   +32 precision i64
+    //   +8  tag      u8  (0=clock, 1=fd_read, 2=fd_write)
+    //   +16 clock_id u32 (tag=0) / fd i32 (tag=1/2)
+    //   +24 timeout  i64 ns (tag=0)
     //   +40 flags    u16 (0=relative)
-    // Layout of one event (32 bytes):
-    //   +0  userdata i64
-    //   +8  error    u16
-    //   +10 type     u8
-    //   +11 padding
-    //   +16 fd_readwrite.nbytes i64 (unused for clock)
+    // Event layout (32 bytes):
+    //   +0  userdata i64 / +8 error u16 / +10 type u8 / +16 nbytes i64
     poll_oneoff(inPtr, outPtr, nSubs, nEventsPtr) {
       const dv = v();
-      let nWritten = 0;
+      // First pass: separate fd_read subs from the optional clock sub.
+      let clockBase = -1;
+      const fdReads = [];
       for (let i = 0; i < nSubs; i++) {
         const base = inPtr + i * 48;
         const tag  = dv.getUint8(base + 8);
-        if (tag === 0) {
-          // Clock subscription — sleep
-          const timeoutNs = Number(dv.getBigUint64(base + 24, true));
-          const ms = timeoutNs / 1_000_000;
-          // In a Web Worker Atomics.wait() gives a true synchronous sleep.
-          // On the main thread it is not allowed; fall back to spin-wait.
-          try {
-            const tmp = new Int32Array(new SharedArrayBuffer(4));
-            Atomics.wait(tmp, 0, 0, ms);
-          } catch (_) {
-            const deadline = performance.now() + ms;
-            while (performance.now() < deadline) { /* spin */ }
+        if      (tag === 0) clockBase = base;
+        else if (tag === 1) fdReads.push({ base, fd: dv.getUint32(base + 16, true) });
+      }
+
+      let nWritten = 0;
+
+      if (fdReads.length > 0 && onPollFdRead) {
+        // Blocking fd_read wait — use clock timeout if present, else -1 (forever).
+        const timeoutMs = clockBase >= 0
+          ? Number(dv.getBigUint64(clockBase + 24, true)) / 1_000_000
+          : -1;
+        for (const { base, fd } of fdReads) {
+          const readable = onPollFdRead(fd, timeoutMs);
+          if (readable) {
+            const oBase = outPtr + nWritten * 32;
+            dv.setBigUint64(oBase,      dv.getBigUint64(base, true), true);
+            dv.setUint16   (oBase + 8,  0, true); // error = 0
+            dv.setUint8    (oBase + 10, 1);        // type  = fd_read
+            dv.setBigUint64(oBase + 16, 0n, true); // nbytes (unknown)
+            nWritten++;
           }
-          // Write the clock event to the output buffer
-          const oBase = outPtr + nWritten * 32;
-          dv.setBigUint64(oBase,      dv.getBigUint64(base, true), true); // userdata
-          dv.setUint16   (oBase + 8,  0,   true); // error = 0
-          dv.setUint8    (oBase + 10, 0);          // type  = clock
+        }
+        // If timed out (nothing readable) and there is a clock sub, fire clock event.
+        if (nWritten === 0 && clockBase >= 0) {
+          const oBase = outPtr;
+          dv.setBigUint64(oBase,      dv.getBigUint64(clockBase, true), true);
+          dv.setUint16   (oBase + 8,  0, true);
+          dv.setUint8    (oBase + 10, 0);
           nWritten++;
         }
-        // fd subscriptions not implemented; skip silently
+      } else if (clockBase >= 0) {
+        // Clock-only subscription — synchronous sleep.
+        const ms = Number(dv.getBigUint64(clockBase + 24, true)) / 1_000_000;
+        try {
+          const tmp = new Int32Array(new SharedArrayBuffer(4));
+          Atomics.wait(tmp, 0, 0, ms);
+        } catch (_) {
+          const deadline = performance.now() + ms;
+          while (performance.now() < deadline) { /* spin */ }
+        }
+        const oBase = outPtr;
+        dv.setBigUint64(oBase,      dv.getBigUint64(clockBase, true), true);
+        dv.setUint16   (oBase + 8,  0, true);
+        dv.setUint8    (oBase + 10, 0);
+        nWritten++;
       }
+
       dv.setUint32(nEventsPtr, nWritten, true);
       return ESUCCESS;
     },

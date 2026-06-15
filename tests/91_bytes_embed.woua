@@ -1,0 +1,13 @@
+;; @test bytes-embed
+;; @feature (defstatic name :bytes "file") — build-time file embedding with {ptr,len} iovec header
+;; @expect
+;;   len=13
+;;   Hello, woua!
+(include io)
+
+(defstatic page :bytes "fixture_91.txt")
+
+(defn main () :i32
+  (printf "len=%d\n" (static-len page))
+  (write 1 (static-ptr page) (static-len page))
+  0)

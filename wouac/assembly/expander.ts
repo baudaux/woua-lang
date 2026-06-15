@@ -258,7 +258,7 @@ function expandNode(node: Node, env: Env): Node {
       return new IntNode(env.types.get(structName).size as i64);
     }
     // compile-time static-ptr / static-len / static-ref intrinsics
-    if (name == "static-ptr" || name == "static-len" || name == "static-ref") {
+    if (name == "static-ptr" || name == "static-len" || name == "static-ref" || name == "static-iov") {
       const argNode = expandNode(list.children[1], env);
       const symName = (argNode as SymbolNode).name;
       if (!env.statics.has(symName)) {
@@ -267,13 +267,21 @@ function expandNode(node: Node, env: Env): Node {
       }
       const info = env.statics.get(symName);
       // static-ref  → header address (only meaningful for :str statics)
-      // static-ptr  → for :str statics, base = hdrPtr+8; otherwise ptr
+      // static-ptr  → for :str / :bytes-file statics, raw bytes start at hdrPtr+8; otherwise ptr
       // static-len  → byte length
+      // static-iov  → iovec header address (only valid for :bytes-file statics)
       let val: i64;
       if (name == "static-ref") {
         val = info.ptr as i64;
       } else if (name == "static-ptr") {
-        val = info.typeName == ":*str" ? (info.ptr + 8) as i64 : info.ptr as i64;
+        val = (info.typeName == ":*str" || info.typeName == ":bytes-file")
+          ? (info.ptr + 8) as i64 : info.ptr as i64;
+      } else if (name == "static-iov") {
+        if (info.typeName != ":bytes-file") {
+          env.errors.push("static-iov: '" + symName + "' is not a :bytes file embed (got " + info.typeName + ")");
+          return new IntNode(0 as i64);
+        }
+        val = info.ptr as i64;
       } else {
         val = info.len as i64;
       }
@@ -360,7 +368,7 @@ function expandNode(node: Node, env: Env): Node {
       const inner = expandNode(list.children[1], env);
       if (inner.tag != TAG_MACROLIST) return expandNode(inner, env);
       const items = (inner as MacroListNode).items;
-      if (items.length == 0) return new IntNode(0 as i64);
+      if (items.length == 0) { const nop = new ListNode(); nop.children.push(new SymbolNode("progn")); return nop; }
       if (items.length == 1) return expandNode(items[0], env);
       const seq = new ListNode();
       seq.children.push(new SymbolNode("macro-seq"));
@@ -584,7 +592,7 @@ function substituteNode(node: Node, subst: Map<string, Node>, env: Env): Node {
         if (head == "static-ref") {
           val = info.ptr as i64;
         } else if (head == "static-ptr") {
-          val = info.typeName == ":*str" ? (info.ptr + 8) as i64 : info.ptr as i64;
+          val = (info.typeName == ":*str" || info.typeName == ":bytes-file") ? (info.ptr + 8) as i64 : info.ptr as i64;
         } else {
           val = info.len as i64;
         }
